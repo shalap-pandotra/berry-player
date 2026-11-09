@@ -124,6 +124,7 @@ pub struct App {
     device_name: String,
     last_device_check: Instant,
     pub volume: f32,
+    pub nerd_icons: bool, // BERRY_ICONS=nerd swaps the plain control symbols for Nerd Font icons
     // cover art
     pub cover_area: Rect,
     cover: Option<Vec<u8>>,
@@ -801,6 +802,7 @@ fn main() -> io::Result<()> {
         device_name: default_device_name(),
         last_device_check: Instant::now(),
         volume: 1.0,
+        nerd_icons: std::env::var("BERRY_ICONS").is_ok_and(|v| v.eq_ignore_ascii_case("nerd")),
         cover_area: Rect::default(),
         cover: None,
         art_cache: HashMap::new(),

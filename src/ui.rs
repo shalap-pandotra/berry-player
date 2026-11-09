@@ -285,15 +285,18 @@ fn draw_track_info(f: &mut Frame, app: &App, info: Rect) {
         None => f.render_widget(Paragraph::new("nothing playing").style(dim()), text),
     }
 
-    // controls (nerd font icons) with their keys underneath
-    let play = if app.current.is_some() && !app.sink.is_paused() { "\u{f03e4}" } else { "\u{f040a}" };
-    f.render_widget(
-        Paragraph::new(vec![
-            Line::raw(format!("\u{f04ae}   {play}   \u{f04ad}      vol {}%", (app.volume * 100.0).round())),
-            Line::styled("p   spc   n      - =", dim()),
-        ]),
-        controls,
-    );
+    // controls with their keys underneath: plain symbols every font has,
+    // or Nerd Font icons when BERRY_ICONS=nerd
+    let playing = app.current.is_some() && !app.sink.is_paused();
+    let vol = (app.volume * 100.0).round();
+    let (icons, keys) = if app.nerd_icons {
+        let play = if playing { "\u{f03e4}" } else { "\u{f040a}" };
+        (format!("\u{f04ae}   {play}   \u{f04ad}      vol {vol}%"), "p   spc   n      - =")
+    } else {
+        let play = if playing { "‖" } else { "▶" };
+        (format!("|◀   {play}   ▶|     vol {vol}%"), "p   spc  n      - =")
+    };
+    f.render_widget(Paragraph::new(vec![Line::raw(icons), Line::styled(keys, dim())]), controls);
 }
 
 fn draw_toasts(f: &mut Frame, app: &mut App, area: Rect) {
