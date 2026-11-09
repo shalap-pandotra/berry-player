@@ -46,7 +46,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         // home
         let right_w = ((area.width as u32 * 2 / 5) as u16).clamp(28, 64).min(area.width.saturating_sub(30));
         let [left, right] = Layout::horizontal([Constraint::Min(30), Constraint::Length(right_w)]).areas(area);
-        let [tabs, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(3)]).areas(left);
+        let [tabs, _, body] =
+            Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Min(3)]).areas(left);
         draw_tabs(f, app, tabs);
         draw_queue(f, app, body);
         draw_now_playing(f, app, right);
@@ -88,7 +89,7 @@ fn draw_now_bar(f: &mut Frame, app: &mut App, area: Rect) {
 fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
     let mut spans = vec![Span::raw(" ")];
     for (i, t) in Tab::ALL.iter().enumerate() {
-        let label = format!(" {} {} ", i + 1, t.name());
+        let label = format!(" [{}] {} ", i + 1, t.name());
         spans.push(if *t == app.tab {
             Span::styled(label, Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD))
         } else {
