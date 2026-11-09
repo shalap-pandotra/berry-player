@@ -147,7 +147,11 @@ fn track_items(app: &App, album: Option<usize>) -> Vec<ListItem<'static>> {
                 .map(|t| {
                     let mark = if Some(&t.path) == playing.as_ref() { "♪ " } else { "  " };
                     ListItem::new(Line::from(vec![
-                        Span::raw(format!("{mark}{:>2}  {}", t.number, t.title)),
+                        Span::raw(format!(
+                            "{mark}{}  {}",
+                            if t.number > 0 { format!("{:>2}", t.number) } else { "  ".to_string() },
+                            t.title
+                        )),
                         Span::styled(format!("  {}", fmt(t.duration)), dim()),
                     ]))
                 })

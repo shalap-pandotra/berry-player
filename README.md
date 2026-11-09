@@ -55,7 +55,10 @@ The first launch reads every file; after that berry only rereads files that are 
 
 <p align="center"><img src="assets/screenshots/browsing.png" width="512" alt="playing"></p>
 <p align="center"><img src="assets/screenshots/search.png" width="512" alt="playing"></p>
-<p align="center"><img src="assets/screenshots/artist_sort.png" width="512" alt="playing"></p>
+
+the screenshots above come from a my terminal which uses a custom theme. if you run berry in just a stock windows terminal, this is what it looks like. it just picks up whatever colors your terminal uses.
+
+<p align="center"><img src="assets/screenshots/stock.png" width="512" alt="playing"></p>
 
 ## Keys
 
