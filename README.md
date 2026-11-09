@@ -34,7 +34,7 @@ Windows may show a SmartScreen warning the first time, since the exe isn't signe
 **From source:** install [Rust](https://rustup.rs) (including the Visual Studio C++ Build Tools it offers during setup), then:
 
 ```
-cargo install --git https://github.com/shalap-pandotra/berry
+cargo install --git https://github.com/shalap-pandotra/berry-player
 ```
 
 ## Usage
