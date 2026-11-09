@@ -1,0 +1,34 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/berry.exe dist/berry.exe
+          Compress-Archive -Path dist/berry.exe, README.md -DestinationPath "dist/berry-${{ github.ref_name }}-windows-x64.zip"
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/berry.exe
+            dist/berry-${{ github.ref_name }}-windows-x64.zip
+          generate_release_notes: true
