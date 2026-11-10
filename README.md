@@ -23,8 +23,7 @@ berry plays your local music library inside Windows Terminal: browse by album or
 
 - Windows 10 or 11
 - **Windows Terminal 1.22 or newer.** That's the version that added Sixel image support; on older versions berry still works, just without covers.
-- That's it. berry works with any font. If your terminal uses a [Nerd Font](https://www.nerdfonts.com/), you can swap the playback controls for its nicer icons by setting `BERRY_ICONS=nerd` (see below).
-
+- That's it. berry works with any font. If your terminal uses a [Nerd Font](https://www.nerdfonts.com/), you can swap the playback controls for its nicer icons with `:icons nerd` (see Commands).
 ## Install
 
 **The easy way:** download `berry.exe` from the [latest release](../../releases/latest) and put it somewhere on your PATH, or anywhere you like and run it from there.
@@ -79,19 +78,29 @@ Press `?` inside berry to see these at any time.
 | `h` / `l` | left / right column |
 | `/` | search |
 | `o` | sort the list you're on |
+| `:` | command line (see below) |
 | `J` / `K` | move a song in the queue |
 | `d` / `D` | remove a song / clear the queue |
 | `q` | quit |
 
-## Settings
+## Commands
 
-berry remembers your sort choices on its own. One more option, set before launching:
+Press `:` to open the command line. Tab completes, Up and Down bring back earlier commands, and any unambiguous start works (`:vol`, `:shuf`).
 
-```
-$env:BERRY_ICONS="nerd"; berry     # Nerd Font icons for the playback controls
-```
+| Command | Does |
+| --- | --- |
+| `:volume 60` | set the volume (0 to 150) |
+| `:seek 1:30` | jump to a time in the song |
+| `:shuffle` | shuffle the queue (the current song keeps playing); again to put the original order back |
+| `:repeat` | cycle repeat: off, the whole queue, one song (or `:repeat all`) |
+| `:clear` | clear the queue |
+| `:folder D:\Music` | switch to another music folder; berry opens it next time too |
+| `:rescan` | reread the current folder |
+| `:icons nerd` | use Nerd Font icons for the playback controls (`:icons plain` to switch back) |
+| `:help` | show the keys |
+| `:q` | quit |
 
-To make it stick, add `$env:BERRY_ICONS="nerd"` to your PowerShell profile, or set it as a user environment variable.
+berry remembers your sorts, your music folder, and your icon choice between launches.
 
 ## Troubleshooting
 

@@ -1,4 +1,4 @@
-use crate::{App, Hit, SortTarget, Tab};
+use crate::{App, Help, Hit, Repeat, SortTarget, Tab, COMMANDS};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
@@ -41,6 +41,27 @@ fn list(f: &mut Frame, area: Rect, title: &str, items: Vec<ListItem<'static>>, s
 }
 
 pub fn draw(f: &mut Frame, app: &mut App) {
+    draw_screen(f, app);
+    draw_command_line(f, app);
+}
+
+/// The `:` prompt, along the bottom edge while it's open, with the commands that match so far.
+fn draw_command_line(f: &mut Frame, app: &App) {
+    let Some(line) = &app.command else { return };
+    let area = f.area();
+    let bar = Rect { x: area.x, y: area.bottom().saturating_sub(1), width: area.width, height: 1 };
+    let mut spans = vec![Span::styled(":", bold()), Span::raw(line.clone()), Span::styled("▏", bold())];
+    if !line.contains(' ') {
+        let hints: Vec<&str> = COMMANDS.iter().copied().filter(|c| c.starts_with(line.as_str())).collect();
+        if !hints.is_empty() && hints.len() < COMMANDS.len() {
+            spans.push(Span::styled(format!("   {}", hints.join("  ")), dim()));
+        }
+    }
+    f.render_widget(Clear, bar);
+    f.render_widget(Paragraph::new(Line::from(spans)), bar);
+}
+
+fn draw_screen(f: &mut Frame, app: &mut App) {
     let area = f.area();
     if app.shown_tab() == Tab::Queue {
         // home
@@ -52,7 +73,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         draw_queue(f, app, body);
         draw_now_playing(f, app, right);
         draw_toasts(f, app, body);
-        if app.help { draw_help(f, body); }
+        if let Some(which) = app.help { draw_help(f, body, which); }
         draw_sort_menu(f, app, body);
     } else {
         // browsing: the lists get the full width, with a compact now playing bar along the bottom
@@ -66,7 +87,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         }
         draw_now_bar(f, app, bar);
         draw_toasts(f, app, body);
-        if app.help { draw_help(f, body); }
+        if let Some(which) = app.help { draw_help(f, body, which); }
         draw_sort_menu(f, app, body);
     }
 }
@@ -437,6 +458,12 @@ fn draw_track_info(f: &mut Frame, app: &App, info: Rect) {
         let play = if playing { "‖" } else { "▶" };
         (format!("|◀   {play}   ▶|     vol {vol}%"), "p   spc  n      - =")
     };
+    let icons = match app.repeat {
+        Repeat::Off => icons,
+        Repeat::All => format!("{icons}   repeat all"),
+        Repeat::One => format!("{icons}   repeat one"),
+    };
+    let icons = if app.unshuffled.is_some() { format!("{icons}   shuffled") } else { icons };
     f.render_widget(Paragraph::new(vec![Line::raw(icons), Line::styled(keys, dim())]), controls);
 }
 
@@ -496,55 +523,84 @@ fn draw_sort_menu(f: &mut Frame, app: &mut App, area: Rect) {
     );
 }
 
-fn draw_help(f: &mut Frame, area: Rect) {
-    // two columns, so it fits even in the short browsing layout
-    let left: &[(&str, &str)] = &[
-        ("", "playback"),
-        ("enter", "play now"),
-        ("a", "add to queue"),
-        ("A", "add the whole album / artist"),
-        ("space", "pause / resume"),
-        ("n  p", "next / previous"),
-        (",  .", "seek back / forward 5s"),
-        ("-  =", "volume down / up"),
-        ("", ""),
-        ("", "queue"),
-        ("J  K", "move song down / up"),
-        ("d", "remove song"),
-        ("D", "clear queue (any tab)"),
-    ];
-    let right: &[(&str, &str)] = &[
-        ("", "moving around"),
-        ("1-4", "jump to a tab"),
-        ("tab", "next tab (shift+tab back)"),
-        ("`", "back to the last tab"),
-        ("j  k", "down / up"),
-        ("h  l", "left / right column"),
-        ("/", "search"),
-        ("o", "sort this list"),
-        ("", ""),
-        ("q", "quit"),
-        ("? esc", "close this"),
-    ];
-    let lines = |rows: &[(&str, &str)]| -> Vec<Line<'static>> {
+fn draw_help(f: &mut Frame, area: Rect, which: Help) {
+    let lines = |rows: &[(&str, &str)], key_w: usize| -> Vec<Line<'static>> {
         rows.iter()
             .map(|(k, v)| {
                 if k.is_empty() {
                     Line::styled(v.to_string(), bold())
                 } else {
-                    Line::from(vec![Span::raw(format!("{k:<7}")), Span::styled(v.to_string(), dim())])
+                    Line::from(vec![Span::raw(format!("{k:<key_w$}")), Span::styled(v.to_string(), dim())])
                 }
             })
             .collect()
     };
-    let w = 80.min(area.width.saturating_sub(2));
-    let h = (left.len().max(right.len()) as u16 + 2).min(area.height);
-    let rect = Rect { x: area.x + (area.width.saturating_sub(w)) / 2, y: area.y + (area.height.saturating_sub(h)) / 2, width: w, height: h };
-    f.render_widget(Clear, rect);
-    let block = Block::bordered().title(" keys ").padding(Padding::horizontal(1));
-    let inner = block.inner(rect);
-    f.render_widget(block, rect);
-    let [l, r] = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(inner);
-    f.render_widget(Paragraph::new(lines(left)), l);
-    f.render_widget(Paragraph::new(lines(right)), r);
+    // a centred box of the given size, cleared, with a title; returns the space inside it
+    let mut panel = |w: u16, h: u16, title: &str| -> Rect {
+        let w = w.min(area.width.saturating_sub(2));
+        let h = h.min(area.height);
+        let rect = Rect { x: area.x + (area.width.saturating_sub(w)) / 2, y: area.y + (area.height.saturating_sub(h)) / 2, width: w, height: h };
+        f.render_widget(Clear, rect);
+        let block = Block::bordered().title(format!(" {title} ")).padding(Padding::horizontal(1));
+        let inner = block.inner(rect);
+        f.render_widget(block, rect);
+        inner
+    };
+    match which {
+        Help::Keys => {
+            let left: &[(&str, &str)] = &[
+                ("", "playback"),
+                ("enter", "play now"),
+                ("a", "add to queue"),
+                ("A", "add the whole album / artist"),
+                ("space", "pause / resume"),
+                ("n  p", "next / previous"),
+                (",  .", "seek back / forward 5s"),
+                ("-  =", "volume down / up"),
+                ("", ""),
+                ("", "queue"),
+                ("J  K", "move song down / up"),
+                ("d", "remove song"),
+                ("D", "clear queue (any tab)"),
+            ];
+            let right: &[(&str, &str)] = &[
+                ("", "moving around"),
+                ("1-4", "jump to a tab"),
+                ("tab", "next tab (shift+tab back)"),
+                ("`", "back to the last tab"),
+                ("j  k", "down / up"),
+                ("h  l", "left / right column"),
+                ("/", "search"),
+                ("o", "sort this list"),
+                (":", "command line (:help lists them)"),
+                ("", ""),
+                ("q", "quit"),
+                ("? esc", "close this"),
+            ];
+            let inner = panel(84, left.len().max(right.len()) as u16 + 2, "keys");
+            let [l, r] = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(inner);
+            f.render_widget(Paragraph::new(lines(left, 7)), l);
+            f.render_widget(Paragraph::new(lines(right, 7)), r);
+        }
+        Help::Commands => {
+            let rows: &[(&str, &str)] = &[
+                ("", "type : then a command. tab completes, up / down for earlier ones"),
+                ("", ""),
+                (":volume 60", "set the volume to 60, from 0 to 150"),
+                (":seek 1:30", "jump to 1:30 in the song"),
+                (":shuffle", "shuffle the queue; again to put it back"),
+                (":repeat", "cycle off / all / one, or :repeat all"),
+                (":clear", "clear the queue"),
+                (":folder D:\\Music", "switch to another music folder (remembered)"),
+                (":rescan", "reread the current folder"),
+                (":icons nerd", "Nerd Font control icons (:icons plain to undo)"),
+                (":help", "this list"),
+                (":q", "quit"),
+                ("", ""),
+                ("", "a unique start works too: :vol 60, :shuf, :rep one"),
+            ];
+            let inner = panel(76, rows.len() as u16 + 2, "commands");
+            f.render_widget(Paragraph::new(lines(rows, 19)), inner);
+        }
+    }
 }

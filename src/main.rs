@@ -43,6 +43,19 @@ pub struct Artist {
     pub albums: Vec<usize>, // indices into App::albums
 }
 
+/// The two help panels: `?` for keys, `:help` for commands.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Help { Keys, Commands }
+
+/// What happens when the queue runs out (or, for One, when a song ends).
+#[derive(Clone, Copy, PartialEq)]
+pub enum Repeat { Off, All, One }
+
+/// Commands the `:` line knows, for Tab completion and the hints shown while typing.
+pub const COMMANDS: &[&str] = &[
+    "clear", "folder", "help", "icons", "quit", "repeat", "rescan", "seek", "shuffle", "volume",
+];
+
 /// The lists that can be sorted from the `o` menu.
 #[derive(Clone, Copy, PartialEq)]
 pub enum SortTarget { Albums, Artists, ArtistAlbums }
@@ -120,14 +133,21 @@ pub struct App {
     pub editing: bool,
     pub hits: Vec<Hit>,
     pub hit_state: ListState,
-    pub help: bool,
+    pub help: Option<Help>,
     // audio
     _stream: OutputStream,
     pub sink: Sink,
     device_name: String,
     last_device_check: Instant,
     pub volume: f32,
-    pub nerd_icons: bool, // BERRY_ICONS=nerd swaps the plain control symbols for Nerd Font icons
+    pub nerd_icons: bool, // Nerd Font icons for the playback controls (:icons nerd, or BERRY_ICONS=nerd)
+    pub repeat: Repeat,
+    pub unshuffled: Option<Vec<Track>>, // the queue's order before :shuffle, so a second :shuffle can undo it
+    root: PathBuf, // the music folder being shown
+    // the : command line: what's being typed (None when closed), and earlier commands for Up/Down
+    pub command: Option<String>,
+    history: Vec<String>,
+    history_pos: Option<usize>,
     // cover art
     pub cover_area: Rect,
     cover: Option<Vec<u8>>,
@@ -351,6 +371,7 @@ impl App {
         }
         if let Some((tracks, start, _)) = self.selection() {
             self.queue = tracks;
+            self.unshuffled = None; // a brand new queue: nothing to unshuffle back to
             self.play_at(start);
         }
     }
@@ -369,8 +390,10 @@ impl App {
 
     fn skip(&mut self, delta: isize) {
         if let Some(i) = self.current {
-            let next = i as isize + delta;
-            if next >= 0 && (next as usize) < self.queue.len() { self.play_at(next as usize); }
+            let len = self.queue.len() as isize;
+            let mut next = i as isize + delta;
+            if self.repeat == Repeat::All { next = next.rem_euclid(len.max(1)); } // wrap around
+            if next >= 0 && next < len { self.play_at(next as usize); }
         }
     }
 
@@ -397,8 +420,189 @@ impl App {
         self.queue_state.select(Some(j));
     }
 
+    // ---------- the : command line ----------
+
+    fn command_key(&mut self, k: KeyEvent) {
+        let Some(line) = self.command.as_mut() else { return };
+        match k.code {
+            KeyCode::Esc => self.command = None,
+            KeyCode::Enter => {
+                let line = std::mem::take(line);
+                self.command = None;
+                if !line.trim().is_empty() && self.history.last() != Some(&line) { self.history.push(line.clone()); }
+                self.history_pos = None;
+                self.run_command(&line);
+            }
+            KeyCode::Backspace => {
+                if line.pop().is_none() { self.command = None; } // backspacing past the start closes it
+            }
+            KeyCode::Tab => *line = complete(line),
+            KeyCode::Up if !self.history.is_empty() => {
+                let pos = self.history_pos.map_or(self.history.len() - 1, |p| p.saturating_sub(1));
+                self.history_pos = Some(pos);
+                *line = self.history[pos].clone();
+            }
+            KeyCode::Down => {
+                if let Some(p) = self.history_pos {
+                    if p + 1 < self.history.len() {
+                        self.history_pos = Some(p + 1);
+                        *line = self.history[p + 1].clone();
+                    } else {
+                        self.history_pos = None;
+                        line.clear();
+                    }
+                }
+            }
+            KeyCode::Char(c) if !k.modifiers.contains(KeyModifiers::CONTROL) => line.push(c),
+            _ => {}
+        }
+    }
+
+    fn run_command(&mut self, line: &str) {
+        let line = line.trim();
+        let (name, arg) = match line.split_once(char::is_whitespace) {
+            Some((n, a)) => (n, a.trim()),
+            None => (line, ""),
+        };
+        // a unique start is enough: :vol, :shuf, :rep all work
+        let matches: Vec<&str> = COMMANDS.iter().copied().filter(|c| c.starts_with(name)).collect();
+        let name = match (name, matches.as_slice()) {
+            ("q", _) => "quit",
+            (_, [only]) => only,
+            _ => name,
+        };
+        match name {
+            "" => {}
+            "quit" => self.quit = true,
+            "help" => self.help = Some(Help::Commands),
+            "clear" => self.clear_queue(),
+            "shuffle" => self.shuffle(),
+            "rescan" => {
+                let root = self.root.clone();
+                self.load_folder(root);
+            }
+            "folder" => {
+                if arg.is_empty() {
+                    self.toast(format!("library: {}", self.root.display()));
+                } else {
+                    self.load_folder(PathBuf::from(arg.trim_matches('"')));
+                }
+            }
+            "volume" => match arg.trim_end_matches('%').parse::<f32>() {
+                Ok(v) => {
+                    self.volume = (v / 100.0).clamp(0.0, 1.5);
+                    self.sink.set_volume(self.volume);
+                    self.toast(format!("volume {}%", (self.volume * 100.0).round()));
+                }
+                Err(_) => self.toast("usage: :volume 0 to 150"),
+            },
+            "seek" => match parse_time(arg) {
+                Some(t) if self.current.is_some() => { let _ = self.sink.try_seek(t); }
+                Some(_) => self.toast("nothing's playing"),
+                None => self.toast("usage: :seek 1:30 (or seconds)"),
+            },
+            "repeat" => {
+                self.repeat = match arg {
+                    "off" => Repeat::Off,
+                    "all" => Repeat::All,
+                    "one" => Repeat::One,
+                    "" => match self.repeat { Repeat::Off => Repeat::All, Repeat::All => Repeat::One, Repeat::One => Repeat::Off },
+                    _ => {
+                        self.toast("usage: :repeat off, all, or one");
+                        return;
+                    }
+                };
+                let label = match self.repeat { Repeat::Off => "off", Repeat::All => "the whole queue", Repeat::One => "this song" };
+                self.toast(format!("repeat: {label}"));
+            }
+            "icons" => {
+                match arg {
+                    "nerd" => self.nerd_icons = true,
+                    "plain" => self.nerd_icons = false,
+                    _ => {
+                        self.toast("usage: :icons nerd or :icons plain");
+                        return;
+                    }
+                }
+                library::save_setting("icons", arg);
+                self.toast(format!("{arg} icons"));
+            }
+            other => self.toast(format!("unknown command: {other} (try :help)")),
+        }
+    }
+
+    /// Shuffle the queue (the song that's playing moves to the top and keeps playing), or, if it's
+    /// already shuffled, put the original order back.
+    fn shuffle(&mut self) {
+        if let Some(original) = self.unshuffled.take() {
+            self.unshuffle(original);
+            return;
+        }
+        if self.queue.len() < 2 { return; }
+        self.unshuffled = Some(self.queue.clone());
+        let start = match self.current {
+            Some(c) => { self.queue.swap(0, c); self.current = Some(0); 1 }
+            None => 0,
+        };
+        // a small xorshift generator seeded from the clock is plenty for shuffling songs
+        let mut x = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64) | 1;
+        for i in (start + 1..self.queue.len()).rev() {
+            x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+            let j = start + (x % (i - start + 1) as u64) as usize;
+            self.queue.swap(i, j);
+        }
+        self.queue_state.select(Some(0));
+        let n = self.queue.len();
+        self.toast(format!("shuffled {n} songs"));
+    }
+
+    /// Back to the order from before :shuffle. Songs added since go at the end, songs removed stay
+    /// gone, and the current song keeps playing from its old spot.
+    fn unshuffle(&mut self, original: Vec<Track>) {
+        let playing = self.playing().map(|t| t.path.clone());
+        let mut rest = std::mem::take(&mut self.queue);
+        let mut restored = Vec::with_capacity(rest.len());
+        for t in original {
+            if let Some(pos) = rest.iter().position(|r| r.path == t.path) {
+                restored.push(rest.remove(pos));
+            }
+        }
+        restored.extend(rest);
+        self.queue = restored;
+        self.current = playing.and_then(|p| self.queue.iter().position(|t| t.path == p));
+        self.queue_state.select(self.current.or(if self.queue.is_empty() { None } else { Some(0) }));
+        self.toast("back to the original order");
+    }
+
+    /// Switch to (or rescan) a music folder, and remember it for next time.
+    fn load_folder(&mut self, dir: PathBuf) {
+        if !dir.is_dir() {
+            self.toast(format!("can't find the folder {}", dir.display()));
+            return;
+        }
+        let albums = library::scan(&dir);
+        if albums.is_empty() {
+            self.toast(format!("no music found in {}", dir.display()));
+            return;
+        }
+        self.artists = build_artists(&albums);
+        self.albums = albums;
+        self.apply_sorts();
+        for state in [&mut self.album_state, &mut self.album_track_state, &mut self.artist_state, &mut self.artist_album_state, &mut self.artist_track_state] {
+            state.select(Some(0));
+        }
+        self.search(); // results pointed into the old library
+        self.preview = None;
+        self.preview_pending = None;
+        library::save_setting("folder", &dir.to_string_lossy());
+        let n = self.albums.len();
+        self.toast(format!("{n} album{} in {}", if n == 1 { "" } else { "s" }, dir.display()));
+        self.root = dir;
+    }
+
     /// Clear the queue, keeping the song that's playing so the music doesn't cut out.
     fn clear_queue(&mut self) {
+        self.unshuffled = None;
         match self.playing().cloned() {
             Some(t) => {
                 self.queue = vec![t];
@@ -567,6 +771,10 @@ impl App {
     }
 
     fn key(&mut self, k: KeyEvent) {
+        if self.command.is_some() {
+            self.command_key(k);
+            return;
+        }
         let tabs = Tab::ALL.len();
         if self.editing {
             match k.code {
@@ -584,8 +792,8 @@ impl App {
             }
             return;
         }
-        if self.help {
-            if matches!(k.code, KeyCode::Char('?') | KeyCode::Esc | KeyCode::Char('q')) { self.help = false; }
+        if self.help.is_some() {
+            if matches!(k.code, KeyCode::Char('?') | KeyCode::Esc | KeyCode::Char('q')) { self.help = None; }
             return;
         }
         if let Some(menu) = self.menu.as_mut() {
@@ -606,8 +814,9 @@ impl App {
         }
         match k.code {
             KeyCode::Char('q') => self.quit = true,
+            KeyCode::Char(':') => self.command = Some(String::new()),
             KeyCode::Char('`') => self.switch_tab(self.last_tab),
-            KeyCode::Char('?') => self.help = true,
+            KeyCode::Char('?') => self.help = Some(Help::Keys),
             KeyCode::Char('o') => self.open_sort_menu(),
             KeyCode::Char(c @ '1'..='4') => self.switch_tab(Tab::ALL[c as usize - '1' as usize]),
             KeyCode::Tab => self.switch_tab(Tab::ALL[(self.tab.index() + 1) % tabs]),
@@ -670,8 +879,12 @@ impl App {
         self.update_preview();
         if let Some(i) = self.current {
             if self.sink.empty() && !self.sink.is_paused() {
-                if i + 1 < self.queue.len() {
+                if self.repeat == Repeat::One {
+                    self.play_at(i);
+                } else if i + 1 < self.queue.len() {
                     self.play_at(i + 1);
+                } else if self.repeat == Repeat::All {
+                    self.play_at(0);
                 } else {
                     self.current = None;
                     self.load_cover();
@@ -679,6 +892,46 @@ impl App {
             }
         }
     }
+}
+
+/// Tab completion for the command line: finish a command name (or `repeat`/`icons` options) as far
+/// as it's unambiguous.
+fn complete(line: &str) -> String {
+    let options: Vec<&str>;
+    let (head, word) = match line.split_once(' ') {
+        Some((cmd, arg)) => {
+            options = match cmd {
+                "repeat" => vec!["off", "all", "one"],
+                "icons" => vec!["nerd", "plain"],
+                _ => return line.to_string(),
+            };
+            (format!("{cmd} "), arg)
+        }
+        None => {
+            options = COMMANDS.to_vec();
+            (String::new(), line)
+        }
+    };
+    let matches: Vec<&str> = options.into_iter().filter(|o| o.starts_with(word)).collect();
+    match matches.as_slice() {
+        [] => line.to_string(),
+        [only] => format!("{head}{only}{}", if head.is_empty() && matches!(*only, "volume" | "seek" | "folder" | "repeat" | "icons") { " " } else { "" }),
+        many => {
+            // as far as all the matches agree
+            let first = many[0];
+            let common = (word.len()..=first.len()).rev().find(|&n| many.iter().all(|m| m.starts_with(&first[..n]))).unwrap_or(word.len());
+            format!("{head}{}", &first[..common])
+        }
+    }
+}
+
+/// "1:30", "90", or "1:02:03" as a duration.
+fn parse_time(s: &str) -> Option<Duration> {
+    let mut secs = 0u64;
+    for part in s.split(':') {
+        secs = secs * 60 + part.trim().parse::<u64>().ok()?;
+    }
+    (!s.is_empty()).then(|| Duration::from_secs(secs))
 }
 
 fn default_device_name() -> String {
@@ -776,6 +1029,10 @@ fn music_dir() -> PathBuf {
     if let Some(arg) = std::env::args().nth(1) {
         return PathBuf::from(arg);
     }
+    // the folder last opened with :folder, if it's still there
+    if let Some(saved) = library::setting("folder").map(PathBuf::from).filter(|p| p.is_dir()) {
+        return saved;
+    }
     let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap_or_else(|_| ".".into());
     PathBuf::from(home).join("Music")
 }
@@ -823,13 +1080,22 @@ fn main() -> io::Result<()> {
         editing: false,
         hits: Vec::new(),
         hit_state: ListState::default(),
-        help: false,
+        help: None,
         _stream: stream,
         sink,
         device_name: default_device_name(),
         last_device_check: Instant::now(),
         volume: 1.0,
-        nerd_icons: std::env::var("BERRY_ICONS").is_ok_and(|v| v.eq_ignore_ascii_case("nerd")),
+        repeat: Repeat::Off,
+        unshuffled: None,
+        root: dir.clone(),
+        command: None,
+        history: Vec::new(),
+        history_pos: None,
+        nerd_icons: library::setting("icons").map_or_else(
+            || std::env::var("BERRY_ICONS").is_ok_and(|v| v.eq_ignore_ascii_case("nerd")),
+            |v| v == "nerd",
+        ),
         cover_area: Rect::default(),
         cover: None,
         art_cache: HashMap::new(),
