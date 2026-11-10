@@ -106,14 +106,31 @@ fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
+/// A fixed-width column on the right of a list row (an artist, a duration). Longer text ends in "…".
+struct Col {
+    text: String,
+    style: Style,
+    width: usize,
+    right: bool, // right-aligned (numbers) or left-aligned (names)
+}
+
+fn col(text: String, style: Style, width: usize, right: bool) -> Col {
+    Col { text, style, width, right }
+}
+
+/// Width for a column of names: as wide as the longest, but never more than a third of the row.
+fn names_width<'a>(names: impl Iterator<Item = &'a str>, row_width: u16) -> usize {
+    names.map(|n| n.chars().count()).max().unwrap_or(0).min(row_width as usize / 3)
+}
+
 /// One list row. `prefix` (a track number, the ♪ marker) stays put; `left` scrolls like a ribbon
-/// (on the highlighted row) or ends in "…" (on the others) when it doesn't fit; `right`, like a
-/// song's length, always stays whole, pinned to the right edge.
-fn row(prefix: Option<(String, Style)>, left: Vec<(String, Style)>, right: Option<(String, Style)>, width: u16, scroll: Option<usize>) -> Line<'static> {
+/// (on the highlighted row) or ends in "…" (on the others) when it doesn't fit; `cols` are
+/// fixed-width columns lined up on the right, like the artist and a song's length.
+fn row(prefix: Option<(String, Style)>, left: Vec<(String, Style)>, cols: Vec<Col>, width: u16, scroll: Option<usize>) -> Line<'static> {
     let width = width as usize;
     let prefix_w = prefix.as_ref().map_or(0, |(t, _)| t.chars().count());
-    let right_w = right.as_ref().map_or(0, |(t, _)| t.chars().count() + 2);
-    let room = width.saturating_sub(right_w + prefix_w);
+    let cols_w: usize = cols.iter().map(|c| c.width + 2).sum();
+    let room = width.saturating_sub(cols_w + prefix_w);
     let chars: Vec<(char, Style)> = left.iter().flat_map(|(t, st)| t.chars().map(move |c| (c, *st))).collect();
     let blank = (' ', Style::new());
     let shown: Vec<(char, Style)> = if chars.len() <= room {
@@ -121,12 +138,7 @@ fn row(prefix: Option<(String, Style)>, left: Vec<(String, Style)>, right: Optio
         v.resize(room, blank);
         v
     } else if let Some(ticks) = scroll {
-        // the ribbon: the text, a gap, then the text again, sliding left, resting a moment at the start
-        const GAP: usize = 4;
-        const REST: usize = 6;
-        let cycle = chars.len() + GAP;
-        let offset = (ticks % (cycle + REST)).saturating_sub(REST);
-        (0..room).map(|i| chars.get((offset + i) % cycle).copied().unwrap_or(blank)).collect()
+        slide(&chars, room, ticks, blank)
     } else {
         let mut v: Vec<(char, Style)> = chars[..room.saturating_sub(1)].to_vec();
         if room > 0 { v.push(('…', chars[room - 1].1)); }
@@ -145,14 +157,41 @@ fn row(prefix: Option<(String, Style)>, left: Vec<(String, Style)>, right: Optio
         text.push(c);
     }
     spans.push(Span::styled(text, style));
-    if let Some((t, st)) = right {
+    for c in cols {
+        let n = c.text.chars().count();
+        let fitted = if n > c.width {
+            let chars: Vec<char> = c.text.chars().collect();
+            match scroll {
+                // the highlighted row scrolls long names too, in step with its title
+                Some(ticks) => slide(&chars, c.width, ticks, ' ').into_iter().collect(),
+                None => {
+                    let mut t: String = chars[..c.width.saturating_sub(1)].iter().collect();
+                    if c.width > 0 { t.push('…'); }
+                    t
+                }
+            }
+        } else if c.right {
+            format!("{}{}", " ".repeat(c.width - n), c.text)
+        } else {
+            format!("{}{}", c.text, " ".repeat(c.width - n))
+        };
         spans.push(Span::raw("  "));
-        spans.push(Span::styled(t, st));
+        spans.push(Span::styled(fitted, c.style));
     }
     Line::from(spans)
 }
 
-/// How far the highlighted row's ribbon has scrolled, restarting whenever the highlight moves.
+/// The ribbon: the text, a gap, then the text again, sliding left through a `room`-wide window,
+/// resting a moment at the start of each pass.
+fn slide<T: Copy>(items: &[T], room: usize, ticks: usize, blank: T) -> Vec<T> {
+    const GAP: usize = 4;
+    const REST: usize = 6;
+    let cycle = items.len() + GAP;
+    let offset = (ticks % (cycle + REST)).saturating_sub(REST);
+    (0..room).map(|i| items.get((offset + i) % cycle).copied().unwrap_or(blank)).collect()
+}
+
+/// How far the highlighted row's ribbon has scrolled
 fn ticks(app: &mut App, list: u8, selected: Option<usize>) -> usize {
     let key = (list, selected.unwrap_or(usize::MAX));
     if app.marquee_key != key {
@@ -171,6 +210,8 @@ fn draw_queue(f: &mut Frame, app: &mut App, area: Rect) {
     let width = area.width.saturating_sub(2);
     let sel = app.queue_state.selected();
     let t = Some(ticks(app, 0, sel));
+    let artist_w = names_width(app.queue.iter().map(|tr| tr.artist.as_str()), width);
+    let dur_w = app.queue.iter().map(|tr| fmt(tr.duration).len()).max().unwrap_or(0);
     let items: Vec<ListItem> = app
         .queue
         .iter()
@@ -179,8 +220,8 @@ fn draw_queue(f: &mut Frame, app: &mut App, area: Rect) {
             let mark = if Some(i) == app.current { "♪ " } else { "  " };
             ListItem::new(row(
                 Some((mark.to_string(), Style::new())),
-                vec![(tr.title.clone(), Style::new()), (format!("  {}", tr.artist), dim())],
-                Some((fmt(tr.duration), dim())),
+                vec![(tr.title.clone(), Style::new())],
+                vec![col(tr.artist.clone(), dim(), artist_w, false), col(fmt(tr.duration), dim(), dur_w, true)],
                 width,
                 scroll_for(i, sel, t),
             ))
@@ -195,14 +236,14 @@ fn draw_queue(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn album_items(app: &App, indices: &[usize], with_artist: bool, width: u16, sel: Option<usize>, t: Option<usize>) -> Vec<ListItem<'static>> {
+    let artist_w = if with_artist { names_width(indices.iter().map(|&i| app.albums[i].artist.as_str()), width) } else { 0 };
     indices
         .iter()
         .enumerate()
         .map(|(row_i, &i)| {
             let a = &app.albums[i];
-            let mut left = vec![(a.title.clone(), Style::new())];
-            if with_artist { left.push((format!("  {}", a.artist), dim())); }
-            ListItem::new(row(None, left, None, width, scroll_for(row_i, sel, t)))
+            let cols = if with_artist { vec![col(a.artist.clone(), dim(), artist_w, false)] } else { vec![] };
+            ListItem::new(row(None, vec![(a.title.clone(), Style::new())], cols, width, scroll_for(row_i, sel, t)))
         })
         .collect()
 }
@@ -211,6 +252,7 @@ fn track_items(app: &App, album: Option<usize>, width: u16, sel: Option<usize>, 
     let playing = app.playing().map(|tr| tr.path.clone());
     album
         .map(|a| {
+            let dur_w = app.albums[a].tracks.iter().map(|tr| fmt(tr.duration).len()).max().unwrap_or(0);
             app.albums[a]
                 .tracks
                 .iter()
@@ -222,7 +264,7 @@ fn track_items(app: &App, album: Option<usize>, width: u16, sel: Option<usize>, 
                     ListItem::new(row(
                         Some((format!("{mark}{number}  "), Style::new())),
                         vec![(tr.title.clone(), Style::new())],
-                        Some((fmt(tr.duration), dim())),
+                        vec![col(fmt(tr.duration), dim(), dur_w, true)],
                         width,
                         scroll_for(i, sel, t),
                     ))
@@ -259,7 +301,7 @@ fn draw_artists(f: &mut Frame, app: &mut App, area: Rect) {
         .artist_order
         .iter()
         .enumerate()
-        .map(|(row_i, &i)| ListItem::new(row(None, vec![(app.artists[i].name.clone(), Style::new())], None, width, scroll_for(row_i, sel, t))))
+        .map(|(row_i, &i)| ListItem::new(row(None, vec![(app.artists[i].name.clone(), Style::new())], vec![], width, scroll_for(row_i, sel, t))))
         .collect();
     let title = format!("artists · {}", sort_label(app, SortTarget::Artists));
     app.sort_anchors[SortTarget::Artists as usize] = a;
@@ -306,7 +348,7 @@ fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
             ListItem::new(row(
                 Some((format!("{kind}  "), dim())),
                 vec![(main, Style::new()), (format!("  {extra}"), dim())],
-                None,
+                vec![],
                 width,
                 scroll_for(i, sel, t),
             ))
