@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Clear, List, ListItem, ListState, Padding, Paragraph, Wrap},
     Frame,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn fmt(d: Duration) -> String {
     let s = d.as_secs();
@@ -47,7 +47,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         let right_w = ((area.width as u32 * 2 / 5) as u16).clamp(28, 64).min(area.width.saturating_sub(30));
         let [left, right] = Layout::horizontal([Constraint::Min(30), Constraint::Length(right_w)]).areas(area);
         let [tabs, _, body] =
-            Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Min(3)]).areas(left);
+        Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Min(3)]).areas(left);
         draw_tabs(f, app, tabs);
         draw_queue(f, app, body);
         draw_now_playing(f, app, right);
@@ -57,7 +57,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     } else {
         // browsing: the lists get the full width, with a compact now playing bar along the bottom
         let [tabs, body, bar] =
-            Layout::vertical([Constraint::Length(1), Constraint::Min(3), Constraint::Length(BAR_ROWS + 2)]).areas(area);
+        Layout::vertical([Constraint::Length(1), Constraint::Min(3), Constraint::Length(BAR_ROWS + 2)]).areas(area);
         draw_tabs(f, app, tabs);
         match app.shown_tab() {
             Tab::Albums => draw_albums(f, app, body),
@@ -93,8 +93,8 @@ fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
         spans.push(if *t == app.tab {
             Span::styled(label, Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD))
         } else {
-            Span::styled(label, dim())
-        });
+                Span::styled(label, dim())
+            });
         spans.push(Span::raw(" "));
     }
     if app.tab == Tab::Search || !app.query.is_empty() {
@@ -106,17 +106,84 @@ fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
+/// One list row. `prefix` (a track number, the ♪ marker) stays put; `left` scrolls like a ribbon
+/// (on the highlighted row) or ends in "…" (on the others) when it doesn't fit; `right`, like a
+/// song's length, always stays whole, pinned to the right edge.
+fn row(prefix: Option<(String, Style)>, left: Vec<(String, Style)>, right: Option<(String, Style)>, width: u16, scroll: Option<usize>) -> Line<'static> {
+    let width = width as usize;
+    let prefix_w = prefix.as_ref().map_or(0, |(t, _)| t.chars().count());
+    let right_w = right.as_ref().map_or(0, |(t, _)| t.chars().count() + 2);
+    let room = width.saturating_sub(right_w + prefix_w);
+    let chars: Vec<(char, Style)> = left.iter().flat_map(|(t, st)| t.chars().map(move |c| (c, *st))).collect();
+    let blank = (' ', Style::new());
+    let shown: Vec<(char, Style)> = if chars.len() <= room {
+        let mut v = chars;
+        v.resize(room, blank);
+        v
+    } else if let Some(ticks) = scroll {
+        // the ribbon: the text, a gap, then the text again, sliding left, resting a moment at the start
+        const GAP: usize = 4;
+        const REST: usize = 6;
+        let cycle = chars.len() + GAP;
+        let offset = (ticks % (cycle + REST)).saturating_sub(REST);
+        (0..room).map(|i| chars.get((offset + i) % cycle).copied().unwrap_or(blank)).collect()
+    } else {
+        let mut v: Vec<(char, Style)> = chars[..room.saturating_sub(1)].to_vec();
+        if room > 0 { v.push(('…', chars[room - 1].1)); }
+        v
+    };
+    // regroup into spans of the same style
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    if let Some((t, st)) = prefix { spans.push(Span::styled(t, st)); }
+    let mut text = String::new();
+    let mut style = shown.first().map_or(Style::new(), |c| c.1);
+    for (c, st) in shown {
+        if st != style {
+            spans.push(Span::styled(std::mem::take(&mut text), style));
+            style = st;
+        }
+        text.push(c);
+    }
+    spans.push(Span::styled(text, style));
+    if let Some((t, st)) = right {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(t, st));
+    }
+    Line::from(spans)
+}
+
+/// How far the highlighted row's ribbon has scrolled, restarting whenever the highlight moves.
+fn ticks(app: &mut App, list: u8, selected: Option<usize>) -> usize {
+    let key = (list, selected.unwrap_or(usize::MAX));
+    if app.marquee_key != key {
+        app.marquee_key = key;
+        app.marquee_since = Instant::now();
+    }
+    (app.marquee_since.elapsed().as_millis() / 200) as usize
+}
+
+/// The scroll position for row `i` of a list: only the highlighted row of the focused list moves.
+fn scroll_for(i: usize, selected: Option<usize>, ticks: Option<usize>) -> Option<usize> {
+    if Some(i) == selected { ticks } else { None }
+}
+
 fn draw_queue(f: &mut Frame, app: &mut App, area: Rect) {
+    let width = area.width.saturating_sub(2);
+    let sel = app.queue_state.selected();
+    let t = Some(ticks(app, 0, sel));
     let items: Vec<ListItem> = app
         .queue
         .iter()
         .enumerate()
-        .map(|(i, t)| {
+        .map(|(i, tr)| {
             let mark = if Some(i) == app.current { "♪ " } else { "  " };
-            ListItem::new(Line::from(vec![
-                Span::raw(format!("{mark}{}", t.title)),
-                Span::styled(format!("  {}  {}", t.artist, fmt(t.duration)), dim()),
-            ]))
+            ListItem::new(row(
+                Some((mark.to_string(), Style::new())),
+                vec![(tr.title.clone(), Style::new()), (format!("  {}", tr.artist), dim())],
+                Some((fmt(tr.duration), dim())),
+                width,
+                scroll_for(i, sel, t),
+            ))
         })
         .collect();
     let title = if app.queue.is_empty() {
@@ -127,34 +194,38 @@ fn draw_queue(f: &mut Frame, app: &mut App, area: Rect) {
     list(f, area, &title, items, &mut app.queue_state, true);
 }
 
-fn album_items(app: &App, indices: impl Iterator<Item = usize>, with_artist: bool) -> Vec<ListItem<'static>> {
+fn album_items(app: &App, indices: &[usize], with_artist: bool, width: u16, sel: Option<usize>, t: Option<usize>) -> Vec<ListItem<'static>> {
     indices
-        .map(|i| {
+        .iter()
+        .enumerate()
+        .map(|(row_i, &i)| {
             let a = &app.albums[i];
-            let mut spans = vec![Span::raw(a.title.clone())];
-            if with_artist { spans.push(Span::styled(format!("  {}", a.artist), dim())); }
-            ListItem::new(Line::from(spans))
+            let mut left = vec![(a.title.clone(), Style::new())];
+            if with_artist { left.push((format!("  {}", a.artist), dim())); }
+            ListItem::new(row(None, left, None, width, scroll_for(row_i, sel, t)))
         })
         .collect()
 }
 
-fn track_items(app: &App, album: Option<usize>) -> Vec<ListItem<'static>> {
-    let playing = app.playing().map(|t| t.path.clone());
+fn track_items(app: &App, album: Option<usize>, width: u16, sel: Option<usize>, t: Option<usize>) -> Vec<ListItem<'static>> {
+    let playing = app.playing().map(|tr| tr.path.clone());
     album
         .map(|a| {
             app.albums[a]
                 .tracks
                 .iter()
-                .map(|t| {
-                    let mark = if Some(&t.path) == playing.as_ref() { "♪ " } else { "  " };
-                    ListItem::new(Line::from(vec![
-                        Span::raw(format!(
-                            "{mark}{}  {}",
-                            if t.number > 0 { format!("{:>2}", t.number) } else { "  ".to_string() },
-                            t.title
-                        )),
-                        Span::styled(format!("  {}", fmt(t.duration)), dim()),
-                    ]))
+                .enumerate()
+                .map(|(i, tr)| {
+                    let mark = if Some(&tr.path) == playing.as_ref() { "♪ " } else { "  " };
+                    // untagged songs have no track number: leave the space blank rather than show 0
+                    let number = if tr.number > 0 { format!("{:>2}", tr.number) } else { "  ".to_string() };
+                    ListItem::new(row(
+                        Some((format!("{mark}{number}  "), Style::new())),
+                        vec![(tr.title.clone(), Style::new())],
+                        Some((fmt(tr.duration), dim())),
+                        width,
+                        scroll_for(i, sel, t),
+                    ))
                 })
                 .collect()
         })
@@ -164,11 +235,16 @@ fn track_items(app: &App, album: Option<usize>) -> Vec<ListItem<'static>> {
 fn draw_albums(f: &mut Frame, app: &mut App, area: Rect) {
     let [l, r] = Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).areas(area);
     let col = app.col();
-    let albums = album_items(app, app.album_order.iter().copied(), true);
+    let sel = app.album_state.selected();
+    let t = (col == 0).then(|| ticks(app, 1, sel));
+    let order = app.album_order.clone();
+    let albums = album_items(app, &order, true, l.width.saturating_sub(2), sel, t);
     let title = format!("albums · {}", sort_label(app, SortTarget::Albums));
     app.sort_anchors[SortTarget::Albums as usize] = l;
     list(f, l, &title, albums, &mut app.album_state, col == 0);
-    let tracks = track_items(app, app.selected_album());
+    let sel = app.album_track_state.selected();
+    let t = (col == 1).then(|| ticks(app, 2, sel));
+    let tracks = track_items(app, app.selected_album(), r.width.saturating_sub(2), sel, t);
     list(f, r, "tracks", tracks, &mut app.album_track_state, col == 1);
 }
 
@@ -176,46 +252,64 @@ fn draw_artists(f: &mut Frame, app: &mut App, area: Rect) {
     let [a, b, c] = Layout::horizontal([Constraint::Percentage(30), Constraint::Percentage(35), Constraint::Percentage(35)])
         .areas(area);
     let col = app.col();
-    let artists: Vec<ListItem> = app.artist_order.iter().map(|&i| ListItem::new(app.artists[i].name.clone())).collect();
+    let sel = app.artist_state.selected();
+    let t = (col == 0).then(|| ticks(app, 3, sel));
+    let width = a.width.saturating_sub(2);
+    let artists: Vec<ListItem> = app
+        .artist_order
+        .iter()
+        .enumerate()
+        .map(|(row_i, &i)| ListItem::new(row(None, vec![(app.artists[i].name.clone(), Style::new())], None, width, scroll_for(row_i, sel, t))))
+        .collect();
     let title = format!("artists · {}", sort_label(app, SortTarget::Artists));
     app.sort_anchors[SortTarget::Artists as usize] = a;
     list(f, a, &title, artists, &mut app.artist_state, col == 0);
+    let sel = app.artist_album_state.selected();
+    let t = (col == 1).then(|| ticks(app, 4, sel));
     let albums = app
         .selected_artist()
-        .map(|s| album_items(app, app.artists[s].albums.clone().into_iter(), false))
+        .map(|s| album_items(app, &app.artists[s].albums.clone(), false, b.width.saturating_sub(2), sel, t))
         .unwrap_or_default();
     let title = format!("albums · {}", sort_label(app, SortTarget::ArtistAlbums));
     app.sort_anchors[SortTarget::ArtistAlbums as usize] = b;
     list(f, b, &title, albums, &mut app.artist_album_state, col == 1);
-    let tracks = track_items(app, app.artist_album());
+    let sel = app.artist_track_state.selected();
+    let t = (col == 2).then(|| ticks(app, 5, sel));
+    let tracks = track_items(app, app.artist_album(), c.width.saturating_sub(2), sel, t);
     list(f, c, "tracks", tracks, &mut app.artist_track_state, col == 2);
 }
 
 fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
     if app.query.is_empty() {
-        let hint = Paragraph::new("type to search artists, albums and songs.\nenter plays, a adds to the queue.")
+        let hint = Paragraph::new("type to search artists, albums and songs.\nenter plays a song or opens an album or artist; a adds to the queue.")
             .style(dim())
             .block(Block::bordered().title(" search ").padding(Padding::uniform(1)));
         f.render_widget(hint, area);
         return;
     }
+    let width = area.width.saturating_sub(2);
+    let sel = app.hit_state.selected();
+    let t = (!app.editing).then(|| ticks(app, 6, sel));
     let items: Vec<ListItem> = app
         .hits
         .iter()
-        .map(|h| {
+        .enumerate()
+        .map(|(i, h)| {
             let (kind, main, extra) = match *h {
                 Hit::Artist(a) => ("artist", app.artists[a].name.clone(), String::new()),
                 Hit::Album(a) => ("album ", app.albums[a].title.clone(), app.albums[a].artist.clone()),
-                Hit::Song(a, t) => {
-                    let tr = &app.albums[a].tracks[t];
+                Hit::Song(a, s) => {
+                    let tr = &app.albums[a].tracks[s];
                     ("song  ", tr.title.clone(), format!("{} · {}", tr.artist, tr.album))
                 }
             };
-            ListItem::new(Line::from(vec![
-                Span::styled(format!("{kind}  "), dim()),
-                Span::raw(main),
-                Span::styled(format!("  {extra}"), dim()),
-            ]))
+            ListItem::new(row(
+                Some((format!("{kind}  "), dim())),
+                vec![(main, Style::new()), (format!("  {extra}"), dim())],
+                None,
+                width,
+                scroll_for(i, sel, t),
+            ))
         })
         .collect();
     let title = format!("search · {} results", app.hits.len());
@@ -263,7 +357,7 @@ fn draw_track_info(f: &mut Frame, app: &App, info: Rect) {
         Constraint::Length(1),
         Constraint::Length(2),
     ])
-    .areas(info);
+        .areas(info);
 
     match app.playing() {
         Some(t) => {
@@ -275,7 +369,7 @@ fn draw_track_info(f: &mut Frame, app: &App, info: Rect) {
                     Line::raw(t.artist.clone()),
                     Line::styled(t.album.clone(), dim()),
                 ])
-                .wrap(Wrap { trim: true }),
+                    .wrap(Wrap { trim: true }),
                 text,
             );
             f.render_widget(Paragraph::new(bar(ratio, gauge.width)), gauge);

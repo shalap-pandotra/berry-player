@@ -101,6 +101,9 @@ pub struct App {
     pub artist_order: Vec<usize>, // artists tab: row -> index into artists
     pub menu: Option<SortMenu>,
     pub sort_anchors: [Rect; 3], // where each sortable list was drawn, so its menu opens in its corner
+    // the ribbon on the highlighted row: which list and row it's on, and since when
+    pub marquee_key: (u8, usize),
+    pub marquee_since: Instant,
     // queue
     pub queue: Vec<Track>,
     pub current: Option<usize>,
@@ -324,6 +327,27 @@ impl App {
         if self.tab == Tab::Queue {
             if let Some(i) = self.queue_state.selected() { self.play_at(i); }
             return;
+        }
+        // in search, only songs play: albums and artists open in their own tabs
+        if self.tab == Tab::Search {
+            match self.hit_state.selected().and_then(|i| self.hits.get(i)).copied() {
+                Some(Hit::Album(a)) => {
+                    self.switch_tab(Tab::Albums);
+                    self.cols[Tab::Albums.index()] = 0;
+                    self.album_state.select(self.album_order.iter().position(|&x| x == a));
+                    self.album_track_state.select(Some(0));
+                    return;
+                }
+                Some(Hit::Artist(a)) => {
+                    self.switch_tab(Tab::Artists);
+                    self.cols[Tab::Artists.index()] = 0;
+                    self.artist_state.select(self.artist_order.iter().position(|&x| x == a));
+                    self.artist_album_state.select(Some(0));
+                    self.artist_track_state.select(Some(0));
+                    return;
+                }
+                _ => {} 
+            }
         }
         if let Some((tracks, start, _)) = self.selection() {
             self.queue = tracks;
@@ -734,7 +758,8 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
         app.painted_spots = app.toast_spots.clone();
         write!(io::stdout(), "\x1b[?2026l")?;
         io::stdout().flush()?;
-        let wait = if app.preview_pending.is_some() { 50 } else { 250 };
+        // (every 200ms otherwise, which also keeps a long title's ribbon moving)
+        let wait = if app.preview_pending.is_some() { 50 } else { 200 };
         if event::poll(Duration::from_millis(wait))? {
             match event::read()? {
                 Event::Key(k) if k.kind == KeyEventKind::Press => app.key(k),
@@ -784,6 +809,8 @@ fn main() -> io::Result<()> {
         artist_order: Vec::new(),
         menu: None,
         sort_anchors: [Rect::default(); 3],
+        marquee_key: (0, usize::MAX),
+        marquee_since: Instant::now(),
         queue: Vec::new(),
         current: None,
         queue_state: ListState::default(),
