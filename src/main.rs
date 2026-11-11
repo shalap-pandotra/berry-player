@@ -45,6 +45,13 @@ pub struct Artist {
     pub albums: Vec<usize>, // indices into App::albums
 }
 
+/// A queue entry that isn't playable yet (a YouTube song still downloading, say): what to show in
+/// its place, and whether it failed for good.
+pub struct Status {
+    pub label: String,
+    pub failed: bool,
+}
+
 /// The two help panels: `?` for keys, `:help` for commands.
 #[derive(Clone, Copy, PartialEq)]
 pub enum Help { Keys, Commands }
@@ -159,9 +166,15 @@ pub struct App {
     history_pos: Option<usize>,
     // cover art
     pub cover_area: Rect,
+    pub cover_wide: bool, // the cover is a wide picture (like a video thumbnail): give it a 16:9 box
+    // queue entries that aren't ready to play yet, by file path, and whether playback is holding
+    // on one of them (it starts the moment it's ready)
+    pub statuses: HashMap<PathBuf, Status>,
+    pub waiting: bool,
     cover: Option<Vec<u8>>,
     art_cache: HashMap<(u16, u16), sixel::Art>, // the current cover, encoded once per box size
     art_area: Rect,                              // where the cover was last laid out
+    art_painted: Rect,                           // where a cover image last actually went on screen
     art_dirty: bool,
     // with nothing playing, the cover box previews the album under the cursor
     preview: Option<usize>,                    // the album being previewed
@@ -337,7 +350,25 @@ impl App {
     /// Start the queue at position i (skipping files that fail to open).
     fn play_at(&mut self, mut i: usize) {
         self.sink.clear();
+        self.waiting = false;
         while i < self.queue.len() {
+            match self.statuses.get(&self.queue[i].path) {
+                // not ready yet: hold here, it starts as soon as it is
+                Some(st) if !st.failed => {
+                    self.current = Some(i);
+                    self.queue_state.select(Some(i));
+                    self.waiting = true;
+                    self.load_cover();
+                    return;
+                }
+                Some(_) => {
+                    let title = self.queue[i].title.clone();
+                    self.toast(format!("couldn't get {title}, skipping it"));
+                    i += 1;
+                    continue;
+                }
+                None => {}
+            }
             if let Some(source) = Self::open(&self.queue[i]) {
                 self.sink.append(source);
                 self.sink.play();
@@ -682,6 +713,7 @@ impl App {
     /// Swap in self.cover. The box stays where it is, so painting blanks it and draws over it,
     /// no full-screen clear needed.
     fn show_new_cover(&mut self) {
+        self.cover_wide = self.cover.as_deref().is_some_and(is_wide);
         self.art_cache.clear();
         self.art_area = Rect::default();
         self.art_dirty = true;
@@ -731,7 +763,9 @@ impl App {
     fn update_art(&mut self) {
         let area = self.cover_area;
         if area == self.art_area { return; }
-        if self.art_area.width > 0 { self.needs_clear = true; }
+        // the box moved or changed shape since an image was last painted: the old image could be
+        // left poking out around the new box, and only a full redraw is sure to remove it
+        if self.art_painted.width > 0 && self.art_painted != area { self.needs_clear = true; }
         self.art_area = area;
         let key = (area.width, area.height);
         if area.width > 0 && !self.art_cache.contains_key(&key) {
@@ -899,7 +933,7 @@ impl App {
         self.collect_stderr();
         self.update_preview();
         if let Some(i) = self.current {
-            if self.sink.empty() && !self.sink.is_paused() {
+            if self.sink.empty() && !self.sink.is_paused() && !self.waiting {
                 if self.repeat == Repeat::One {
                     self.play_at(i);
                 } else if i + 1 < self.queue.len() {
@@ -953,6 +987,16 @@ fn parse_time(s: &str) -> Option<Duration> {
         secs = secs * 60 + part.trim().parse::<u64>().ok()?;
     }
     (!s.is_empty()).then(|| Duration::from_secs(secs))
+}
+
+/// Whether a picture is clearly wider than it is tall (a 16:9 thumbnail rather than square album
+/// art). Only reads the image's header, so it's cheap.
+fn is_wide(bytes: &[u8]) -> bool {
+    image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()
+        .and_then(|r| r.into_dimensions().ok())
+        .is_some_and(|(w, h)| w * 10 > h * 13)
 }
 
 fn default_device_name() -> String {
@@ -1021,10 +1065,12 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
             terminal.draw(|f| ui::draw(f, app))?;
             app.needs_clear = false;
             app.art_dirty = true;
+            app.art_painted = Rect::default(); // the clear took the old image with it
         }
         if app.art_dirty {
             paint_art(app)?;
             app.art_dirty = false;
+            app.art_painted = app.cover_area;
         }
         // toast icons are see-through, so anything redrawn underneath would cut into them:
         // repaint them every frame while toasts are up (they're tiny)
@@ -1120,9 +1166,13 @@ fn main() -> io::Result<()> {
             |v| v == "nerd",
         ),
         cover_area: Rect::default(),
+        cover_wide: false,
+        statuses: HashMap::new(),
+        waiting: false,
         cover: None,
         art_cache: HashMap::new(),
         art_area: Rect::default(),
+        art_painted: Rect::default(),
         preview: None,
         preview_pending: None,
         art_dirty: false,

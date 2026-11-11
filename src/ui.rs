@@ -70,7 +70,14 @@ fn draw_screen(f: &mut Frame, app: &mut App) {
             Layout::vertical([Constraint::Length(1), Constraint::Min(3), Constraint::Length(BAR_ROWS + 2)]).areas(area);
         draw_tabs(f, app, tabs);
         crate::youtube::draw(f, app, body);
-        draw_now_bar(f, app, bar);
+        // songs being fetched get a panel beside the now playing bar
+        if crate::youtube::has_fetches(app) {
+            let [main_bar, side] = Layout::horizontal([Constraint::Min(40), Constraint::Length(46)]).areas(bar);
+            draw_now_bar(f, app, main_bar);
+            crate::youtube::draw_fetches(f, app, side);
+        } else {
+            draw_now_bar(f, app, bar);
+        }
         draw_toasts(f, app, body);
         if let Some(which) = app.help { draw_help(f, body, which); }
         return;
@@ -109,7 +116,8 @@ fn draw_screen(f: &mut Frame, app: &mut App) {
 const BAR_ROWS: u16 = 10;
 
 fn draw_now_bar(f: &mut Frame, app: &mut App, area: Rect) {
-    let [cover, info] = Layout::horizontal([Constraint::Length(BAR_ROWS * 2 + 2), Constraint::Min(20)]).areas(area);
+    let cover_cols = if app.cover_wide { (BAR_ROWS as u32 * 32 / 9) as u16 } else { BAR_ROWS * 2 };
+    let [cover, info] = Layout::horizontal([Constraint::Length(cover_cols + 2), Constraint::Min(20)]).areas(area);
     let cover_block = Block::bordered().border_style(dim());
     app.cover_area = cover_block.inner(cover);
     f.render_widget(cover_block, cover);
@@ -250,7 +258,9 @@ fn draw_queue(f: &mut Frame, app: &mut App, area: Rect) {
     let sel = app.queue_state.selected();
     let t = Some(ticks(app, 0, sel));
     let artist_w = names_width(app.queue.iter().map(|tr| tr.artist.as_str()), width);
-    let dur_w = app.queue.iter().map(|tr| fmt(tr.duration).len()).max().unwrap_or(0);
+    // a song that isn't ready yet shows its status where its length would go
+    let right = |tr: &crate::library::Track| app.statuses.get(&tr.path).map_or_else(|| fmt(tr.duration), |s| s.label.clone());
+    let dur_w = app.queue.iter().map(|tr| right(tr).chars().count()).max().unwrap_or(0);
     let items: Vec<ListItem> = app
         .queue
         .iter()
@@ -260,7 +270,7 @@ fn draw_queue(f: &mut Frame, app: &mut App, area: Rect) {
             ListItem::new(row(
                 Some((mark.to_string(), Style::new())),
                 vec![(tr.title.clone(), Style::new())],
-                vec![col(tr.artist.clone(), dim(), artist_w, false), col(fmt(tr.duration), dim(), dur_w, true)],
+                vec![col(tr.artist.clone(), dim(), artist_w, false), col(right(tr), dim(), dur_w, true)],
                 width,
                 scroll_for(i, sel, t),
             ))
@@ -402,10 +412,18 @@ fn draw_now_playing(f: &mut Frame, app: &mut App, area: Rect) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // a square cover: cells are twice as tall as they are wide, so two columns per row
+    // cells are twice as tall as they are wide: a square cover is two columns per row, and a 16:9
+    // one (video thumbnails) is about three and a half
     const INFO_ROWS: u16 = 8;
-    let rows = ((inner.width.saturating_sub(4)) / 2).min(inner.height.saturating_sub(INFO_ROWS + 3));
-    let cols = rows * 2;
+    let max_rows = inner.height.saturating_sub(INFO_ROWS + 3);
+    let (rows, cols) = if app.cover_wide {
+        let cols = inner.width.saturating_sub(4);
+        let rows = (cols as u32 * 9 / 32).min(max_rows as u32) as u16;
+        (rows, (rows as u32 * 32 / 9) as u16)
+    } else {
+        let rows = (inner.width.saturating_sub(4) / 2).min(max_rows);
+        (rows, rows * 2)
+    };
     let frame = Rect {
         x: inner.x + inner.width.saturating_sub(cols + 2) / 2,
         y: inner.y + 1,
@@ -441,6 +459,20 @@ fn draw_track_info(f: &mut Frame, app: &App, info: Rect) {
         .areas(info);
 
     match app.playing() {
+        // the song is still being fetched: it starts the moment it's ready
+        Some(t) if app.waiting => {
+            let label = app.statuses.get(&t.path).map_or(String::new(), |s| s.label.clone());
+            f.render_widget(
+                Paragraph::new(vec![
+                    Line::styled(t.title.clone(), bold()),
+                    Line::raw(t.artist.clone()),
+                    Line::styled(t.album.clone(), dim()),
+                ])
+                .wrap(Wrap { trim: true }),
+                text,
+            );
+            f.render_widget(Paragraph::new(Line::styled(format!("getting it ready · {label}"), dim())), time);
+        }
         Some(t) => {
             let pos = app.sink.get_pos();
             let ratio = if t.duration.is_zero() { 0.0 } else { (pos.as_secs_f64() / t.duration.as_secs_f64()).min(1.0) };
