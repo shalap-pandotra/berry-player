@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 use walkdir::WalkDir;
 
-const AUDIO: &[&str] = &["mp3", "flac", "ogg", "m4a", "aac", "wav", "aiff", "aif"];
+const AUDIO: &[&str] = &["mp3", "flac", "ogg", "opus", "m4a", "aac", "wav", "aiff", "aif"];
 
 #[derive(Clone)]
 pub struct Track {
@@ -250,6 +250,12 @@ pub fn cover(path: &Path) -> Option<Vec<u8>> {
             if let Some(pic) = tag.pictures().first() {
                 return Some(pic.data().to_vec());
             }
+        }
+    }
+    for ext in ["jpg", "png", "webp"] {
+        let p = path.with_extension(ext);
+        if p.is_file() {
+            return std::fs::read(p).ok();
         }
     }
     let dir = path.parent()?;

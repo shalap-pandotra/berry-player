@@ -63,6 +63,19 @@ fn draw_command_line(f: &mut Frame, app: &App) {
 
 fn draw_screen(f: &mut Frame, app: &mut App) {
     let area = f.area();
+    // YouTube mode's search view: same shape as the browsing tabs, with its own list
+    #[cfg(feature = "youtube")]
+    if app.yt.active && app.yt.on_search {
+        let [tabs, body, bar] =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(3), Constraint::Length(BAR_ROWS + 2)]).areas(area);
+        draw_tabs(f, app, tabs);
+        crate::youtube::draw(f, app, body);
+        draw_now_bar(f, app, bar);
+        draw_toasts(f, app, body);
+        if let Some(which) = app.help { draw_help(f, body, which); }
+        return;
+    }
+    let area = f.area();
     if app.shown_tab() == Tab::Queue {
         // home
         let right_w = ((area.width as u32 * 2 / 5) as u16).clamp(28, 64).min(area.width.saturating_sub(30));
@@ -108,6 +121,11 @@ fn draw_now_bar(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
+    #[cfg(feature = "youtube")]
+    if app.yt.active {
+        f.render_widget(Paragraph::new(crate::youtube::tab_line(app)), area);
+        return;
+    }
     let mut spans = vec![Span::raw(" ")];
     for (i, t) in Tab::ALL.iter().enumerate() {
         let label = format!(" [{}] {} ", i + 1, t.name());

@@ -15,7 +15,7 @@ berry plays your local music library inside Windows Terminal: browse by album or
 - Live search across artists, albums, and songs
 - Sorting by title, artist, year, or recently added, remembered between launches
 - Follows your headphones: switch audio devices and playback moves over on its own
-- Plays MP3, FLAC, OGG, M4A/AAC, WAV, and AIFF
+- Plays MP3, FLAC, Opus, OGG, M4A/AAC, WAV, and AIFF
 - Keyboard driven, with Vim-style keys
 - Uses your terminal's colors, so it matches whatever theme you run
 

@@ -1,17 +1,19 @@
+mod decode;
 mod icon;
 mod library;
 mod sixel;
+#[cfg(feature = "youtube")]
+mod youtube;
 mod ui;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use library::{Album, Track};
 use ratatui::{layout::Rect, widgets::ListState, DefaultTerminal};
 use rodio::cpal::traits::{DeviceTrait, HostTrait};
-use rodio::{Decoder, OutputStream, Sink};
+use rodio::{OutputStream, Sink};
 use std::{
     collections::HashMap,
-    fs::File,
-    io::{self, BufReader, Read, Write},
+    io::{self, Read, Write},
     path::PathBuf,
     time::{Duration, Instant},
 };
@@ -52,8 +54,13 @@ pub enum Help { Keys, Commands }
 pub enum Repeat { Off, All, One }
 
 /// Commands the `:` line knows, for Tab completion and the hints shown while typing.
+#[cfg(not(feature = "youtube"))]
 pub const COMMANDS: &[&str] = &[
     "clear", "folder", "help", "icons", "quit", "repeat", "rescan", "seek", "shuffle", "volume",
+];
+#[cfg(feature = "youtube")]
+pub const COMMANDS: &[&str] = &[
+    "clear", "folder", "help", "icons", "library", "quit", "repeat", "rescan", "seek", "shuffle", "volume", "youtube",
 ];
 
 /// The lists that can be sorted from the `o` menu.
@@ -134,6 +141,8 @@ pub struct App {
     pub hits: Vec<Hit>,
     pub hit_state: ListState,
     pub help: Option<Help>,
+    #[cfg(feature = "youtube")]
+    pub yt: youtube::State,
     // audio
     _stream: OutputStream,
     pub sink: Sink,
@@ -321,8 +330,8 @@ impl App {
 
     // ---------- playback ----------
 
-    fn open(track: &Track) -> Option<Decoder<BufReader<File>>> {
-        File::open(&track.path).ok().and_then(|f| Decoder::new(BufReader::new(f)).ok())
+    fn open(track: &Track) -> Option<decode::FileSource> {
+        decode::FileSource::open(&track.path)
     }
 
     /// Start the queue at position i (skipping files that fail to open).
@@ -468,6 +477,8 @@ impl App {
         let matches: Vec<&str> = COMMANDS.iter().copied().filter(|c| c.starts_with(name)).collect();
         let name = match (name, matches.as_slice()) {
             ("q", _) => "quit",
+            #[cfg(feature = "youtube")]
+            ("yt", _) => "youtube",
             (_, [only]) => only,
             _ => name,
         };
@@ -475,6 +486,10 @@ impl App {
             "" => {}
             "quit" => self.quit = true,
             "help" => self.help = Some(Help::Commands),
+            #[cfg(feature = "youtube")]
+            "youtube" => youtube::enter(self),
+            #[cfg(feature = "youtube")]
+            "library" => youtube::leave(self),
             "clear" => self.clear_queue(),
             "shuffle" => self.shuffle(),
             "rescan" => {
@@ -675,6 +690,8 @@ impl App {
     /// With nothing playing, the album the cursor is on (it gets previewed in the cover box).
     fn browsing_album(&self) -> Option<usize> {
         if self.current.is_some() { return None; }
+        #[cfg(feature = "youtube")]
+        if self.yt.active { return None; } // YouTube results aren't albums in the library
         match self.shown_tab() {
             Tab::Albums => self.selected_album(),
             Tab::Artists => self.artist_album(),
@@ -812,6 +829,8 @@ impl App {
             }
             return;
         }
+        #[cfg(feature = "youtube")]
+        if self.yt.active && youtube::key(self, k) { return; }
         match k.code {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char(':') => self.command = Some(String::new()),
@@ -874,6 +893,8 @@ impl App {
     }
 
     fn tick(&mut self) {
+        #[cfg(feature = "youtube")]
+        youtube::tick(self);
         self.follow_default_device();
         self.collect_stderr();
         self.update_preview();
@@ -1081,6 +1102,8 @@ fn main() -> io::Result<()> {
         hits: Vec::new(),
         hit_state: ListState::default(),
         help: None,
+        #[cfg(feature = "youtube")]
+        yt: youtube::State::new(),
         _stream: stream,
         sink,
         device_name: default_device_name(),

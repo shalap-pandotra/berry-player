@@ -6,13 +6,20 @@ edition = "2021"
 [dependencies]
 ratatui = "0.29"
 crossterm = "0.28"
-rodio = { version = "0.20", default-features = false, features = ["symphonia-all"] }
+rodio = { version = "0.20", default-features = false }
+symphonia = { version = "0.6", features = ["all"] }
+symphonia-adapter-libopus = "0.3"
 lofty = "0.22"
 walkdir = "2"
-image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 color_quant = "1.1"
 gag = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
+serde_json = { version = "1", optional = true }
+
+[features]
+# optional extras that aren't part of the default build
+youtube = ["dep:serde_json"]
 
 [build-dependencies]
 winresource = "0.1"
