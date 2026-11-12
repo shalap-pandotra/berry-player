@@ -1,6 +1,9 @@
 mod decode;
 mod icon;
+mod install;
 mod library;
+mod lyrics;
+mod playlist;
 mod sixel;
 #[cfg(feature = "youtube")]
 mod youtube;
@@ -26,17 +29,17 @@ pub const CELL_H: u32 = 20;
 const TOAST_FOR: Duration = Duration::from_secs(4);
 
 #[derive(Clone, Copy, PartialEq)]
-pub enum Tab { Queue, Albums, Artists, Search }
+pub enum Tab { Queue, Albums, Artists, Search, Playlists }
 
 impl Tab {
-    pub const ALL: [Tab; 4] = [Tab::Queue, Tab::Albums, Tab::Artists, Tab::Search];
+    pub const ALL: [Tab; 5] = [Tab::Queue, Tab::Albums, Tab::Artists, Tab::Search, Tab::Playlists];
     pub fn name(self) -> &'static str {
-        match self { Tab::Queue => "queue", Tab::Albums => "albums", Tab::Artists => "artists", Tab::Search => "search" }
+        match self { Tab::Queue => "queue", Tab::Albums => "albums", Tab::Artists => "artists", Tab::Search => "search", Tab::Playlists => "playlists" }
     }
     fn index(self) -> usize { self as usize }
     /// How many columns this tab has to move between with h/l.
     fn columns(self) -> usize {
-        match self { Tab::Albums => 2, Tab::Artists => 3, _ => 1 }
+        match self { Tab::Albums | Tab::Playlists => 2, Tab::Artists => 3, _ => 1 }
     }
 }
 
@@ -63,16 +66,16 @@ pub enum Repeat { Off, All, One }
 /// Commands the `:` line knows, for Tab completion and the hints shown while typing.
 #[cfg(not(feature = "youtube"))]
 pub const COMMANDS: &[&str] = &[
-    "clear", "folder", "help", "icons", "quit", "repeat", "rescan", "seek", "shuffle", "volume",
+    "clear", "folder", "help", "icons", "lyrics", "quit", "repeat", "rescan", "save", "seek", "shuffle", "volume",
 ];
 #[cfg(feature = "youtube")]
 pub const COMMANDS: &[&str] = &[
-    "clear", "folder", "help", "icons", "library", "quit", "repeat", "rescan", "seek", "shuffle", "volume", "youtube",
+    "clear", "folder", "help", "icons", "library", "lyrics","quit", "repeat", "rescan", "save", "seek", "shuffle", "volume", "youtube",
 ];
 
 /// The lists that can be sorted from the `o` menu.
 #[derive(Clone, Copy, PartialEq)]
-pub enum SortTarget { Albums, Artists, ArtistAlbums }
+pub enum SortTarget { Albums, Artists, ArtistAlbums, Playlists }
 
 impl SortTarget {
     pub fn options(self) -> &'static [&'static str] {
@@ -83,14 +86,20 @@ impl SortTarget {
             ],
             SortTarget::Artists => &["name, a to z", "name, z to a", "most albums", "fewest albums"],
             SortTarget::ArtistAlbums => &["oldest year first", "newest year first", "title, a to z", "title, z to a"],
+            SortTarget::Playlists => &["name, a to z", "name, z to a", "recently changed", "most songs"],
         }
     }
     fn index(self) -> usize { self as usize }
     fn setting(self) -> &'static str {
-        match self { SortTarget::Albums => "sort.albums", SortTarget::Artists => "sort.artists", SortTarget::ArtistAlbums => "sort.artist_albums" }
+        match self {
+            SortTarget::Albums => "sort.albums",
+            SortTarget::Artists => "sort.artists",
+            SortTarget::ArtistAlbums => "sort.artist_albums",
+            SortTarget::Playlists => "sort.playlists",
+        }
     }
     pub fn noun(self) -> &'static str {
-        match self { SortTarget::Artists => "artists", _ => "albums" }
+        match self { SortTarget::Artists => "artists", SortTarget::Playlists => "playlists", _ => "albums" }
     }
 }
 
@@ -98,6 +107,26 @@ impl SortTarget {
 pub struct SortMenu {
     pub target: SortTarget,
     pub state: ListState,
+}
+
+/// The "add to playlist" picker: the songs being added, what's been typed to narrow the list, and
+/// the cursor (row 0 is "new playlist", then the matching playlists).
+pub struct Picker {
+    pub songs: Vec<PathBuf>,
+    pub query: String,
+    pub state: ListState,
+}
+
+/// A small question in the middle of the screen: a name to type, or a yes/no.
+pub enum PromptKind {
+    NewPlaylist(Vec<PathBuf>), // with the songs to put in it
+    Rename(usize),
+    Delete(usize),
+}
+
+pub struct Prompt {
+    pub kind: PromptKind,
+    pub text: String,
 }
 
 /// Names sort the way record shops file them: "The Cure" under C.
@@ -121,13 +150,13 @@ pub struct App {
     pub tab: Tab,
     pub before_search: Tab, // the screen search opened over, shown until something's typed
     pub last_tab: Tab,      // where ` jumps back to
-    pub cols: [usize; 4], // the focused column in each tab
+    pub cols: [usize; 5], // the focused column in each tab
     // sorting: the chosen option for each SortTarget, and the resulting display orders
-    pub sorts: [usize; 3],
+    pub sorts: [usize; 4],
     pub album_order: Vec<usize>,  // albums tab: row -> index into albums
     pub artist_order: Vec<usize>, // artists tab: row -> index into artists
     pub menu: Option<SortMenu>,
-    pub sort_anchors: [Rect; 3], // where each sortable list was drawn, so its menu opens in its corner
+    pub sort_anchors: [Rect; 4], // where each sortable list was drawn, so its menu opens in its corner
     // the ribbon on the highlighted row: which list and row it's on, and since when
     pub marquee_key: (u8, usize),
     pub marquee_since: Instant,
@@ -148,6 +177,22 @@ pub struct App {
     pub hits: Vec<Hit>,
     pub hit_state: ListState,
     pub help: Option<Help>,
+    // playlists tab: the playlists, their display order (sorted, and narrowed by the filter), the
+    // cursor in each column, and the filter being typed
+    pub playlists: Vec<playlist::Playlist>,
+    pub playlist_order: Vec<usize>,
+    pub playlist_state: ListState,
+    pub playlist_song_state: ListState,
+    pub playlist_filter: String,
+    pub filtering: bool,
+    song_index: HashMap<String, (usize, usize)>, // library songs by path, to turn playlist entries back into songs
+    pub picker: Option<Picker>,
+    pub prompt: Option<Prompt>,
+    // the lyrics panel: which screen it's open on (see view()), the lyrics of the song playing (keyed
+    // by its file), and how far plain lyrics are scrolled
+    pub lyrics_view: Option<u8>,
+    pub lyrics: Option<(PathBuf, lyrics::Lyrics)>,
+    pub lyrics_scroll: usize,
     #[cfg(feature = "youtube")]
     pub yt: youtube::State,
     // audio
@@ -191,6 +236,19 @@ pub struct App {
 
 impl App {
     /// The screen actually on display: search shows the screen it opened over until there's a query.
+    /// Which screen is showing, for things that belong to one screen (like the lyrics panel): the
+    /// tab's number, or a number of its own for YouTube's search view.
+    pub fn view(&self) -> u8 {
+        #[cfg(feature = "youtube")]
+        if self.yt.active && self.yt.on_search { return 100; }
+        self.shown_tab().index() as u8
+    }
+
+    /// Whether the lyrics panel is open on the screen showing right now.
+    pub fn lyrics_shown(&self) -> bool {
+        self.lyrics_view == Some(self.view())
+    }
+
     pub fn shown_tab(&self) -> Tab {
         if self.tab == Tab::Search && self.query.is_empty() { self.before_search } else { self.tab }
     }
@@ -239,7 +297,7 @@ impl App {
     // ---------- sorting ----------
 
     fn load_sorts(&mut self) {
-        for t in [SortTarget::Albums, SortTarget::Artists, SortTarget::ArtistAlbums] {
+        for t in [SortTarget::Albums, SortTarget::Artists, SortTarget::ArtistAlbums, SortTarget::Playlists] {
             if let Some(n) = library::setting(t.setting()).and_then(|v| v.parse::<usize>().ok()) {
                 if n < t.options().len() { self.sorts[t.index()] = n; }
             }
@@ -275,6 +333,19 @@ impl App {
         }
         self.artist_order = order;
 
+        let playlists = &self.playlists;
+        let filter = self.playlist_filter.to_lowercase();
+        let mut order: Vec<usize> =
+            (0..playlists.len()).filter(|&i| filter.is_empty() || playlists[i].name.to_lowercase().contains(&filter)).collect();
+        let name = |i: &usize| playlists[*i].name.to_lowercase();
+        match self.sorts[3] {
+            0 => order.sort_by_key(name),
+            1 => order.sort_by_key(|i| Reverse(name(i))),
+            2 => order.sort_by_key(|i| Reverse(playlists[*i].modified)),
+            _ => order.sort_by_key(|i| (Reverse(playlists[*i].songs.len()), name(i))),
+        }
+        self.playlist_order = order;
+
         let choice = self.sorts[2];
         for artist in &mut self.artists {
             match choice {
@@ -291,6 +362,7 @@ impl App {
             (Tab::Albums, _) => SortTarget::Albums,
             (Tab::Artists, 0) => SortTarget::Artists,
             (Tab::Artists, _) => SortTarget::ArtistAlbums,
+            (Tab::Playlists, 0) => SortTarget::Playlists,
             _ => {
                 self.toast("nothing to sort here");
                 return;
@@ -302,7 +374,7 @@ impl App {
 
     /// Apply and remember a sort, keeping the cursor on the same album or artist.
     fn set_sort(&mut self, target: SortTarget, choice: usize) {
-        let (album, artist, artist_album) = (self.selected_album(), self.selected_artist(), self.artist_album());
+        let (album, artist, artist_album, list) = (self.selected_album(), self.selected_artist(), self.artist_album(), self.selected_playlist());
         self.sorts[target.index()] = choice;
         library::save_setting(target.setting(), &choice.to_string());
         self.apply_sorts();
@@ -311,6 +383,7 @@ impl App {
             self.artist_state.select(self.artist_order.iter().position(|&x| x == a));
             if let Some(al) = artist_album { self.artist_album_state.select(self.artists[a].albums.iter().position(|&x| x == al)); }
         }
+        if let Some(p) = list { self.playlist_state.select(self.playlist_order.iter().position(|&x| x == p)); }
     }
 
     fn artist_tracks(&self, artist: usize) -> Vec<Track> {
@@ -337,6 +410,11 @@ impl App {
                 Hit::Album(a) => Some((self.albums[a].tracks.clone(), 0, false)),
                 Hit::Song(a, t) => Some((self.albums[a].tracks.clone(), t, true)),
             },
+            (Tab::Playlists, 0) => Some((self.playlist_tracks(self.selected_playlist()?), 0, false)),
+            (Tab::Playlists, _) => {
+                let tracks = self.playlist_tracks(self.selected_playlist()?);
+                Some((tracks, self.playlist_song_state.selected().unwrap_or(0), true))
+            }
             (Tab::Queue, _) => None,
         }
     }
@@ -406,7 +484,14 @@ impl App {
                     self.artist_track_state.select(Some(0));
                     return;
                 }
-                _ => {} 
+                Some(Hit::Song(a, t)) => {
+                    let song = self.albums[a].tracks[t].clone();
+                    let at = self.current.map_or(self.queue.len(), |i| i + 1);
+                    self.queue.insert(at, song);
+                    self.play_at(at);
+                    return;
+                }
+                None => return,
             }
         }
         if let Some((tracks, start, _)) = self.selection() {
@@ -517,6 +602,16 @@ impl App {
             "" => {}
             "quit" => self.quit = true,
             "help" => self.help = Some(Help::Commands),
+            "lyrics" => self.toggle_lyrics(),
+            "save" if arg.is_empty() => self.toast("save the queue as a playlist with :save name"),
+            "save" => {
+                // YouTube songs live in a cache that clears itself, so they'd fall out of a playlist
+                let songs: Vec<PathBuf> = self.queue.iter().map(|t| t.path.clone()).filter(|p| self.in_library(p)).collect();
+                let skipped = self.queue.len() - songs.len();
+                if songs.is_empty() { return self.toast("nothing in the queue that can go in a playlist"); }
+                self.new_playlist(arg, &songs);
+                if skipped > 0 { self.toast(format!("left out {skipped} YouTube song{}", if skipped == 1 { "" } else { "s" })); }
+            }
             #[cfg(feature = "youtube")]
             "youtube" => youtube::enter(self),
             #[cfg(feature = "youtube")]
@@ -644,6 +739,7 @@ impl App {
         let n = self.albums.len();
         self.toast(format!("{n} album{} in {}", if n == 1 { "" } else { "s" }, dir.display()));
         self.root = dir;
+        self.reload_playlists();
     }
 
     /// Clear the queue, keeping the song that's playing so the music doesn't cut out.
@@ -703,6 +799,45 @@ impl App {
 
     // ---------- cover art ----------
 
+    /// `L`: close the panel if it's on this screen, otherwise open it here (moving it if it was
+    /// open on another screen). Nothing opens for a song without lyrics, just a toast.
+    fn toggle_lyrics(&mut self) {
+        if self.lyrics_shown() {
+            self.lyrics_view = None;
+            return;
+        }
+        if self.playing().is_none() {
+            return self.toast("nothing playing");
+        }
+        self.lyrics = None; // reread: the file may have gained lyrics or an .lrc since
+        self.lyrics_view = Some(self.view());
+        self.load_lyrics();
+    }
+
+    /// Keep the lyrics in step with the song playing while the panel is showing. Cheap to call
+    /// often: it only reads anything when the song has changed. A song without lyrics closes the
+    /// panel (with a toast), and so does the music stopping.
+    fn load_lyrics(&mut self) {
+        if !self.lyrics_shown() || self.waiting { return; }
+        let Some(track) = self.playing() else {
+            self.lyrics_view = None;
+            return;
+        };
+        if self.lyrics.as_ref().is_some_and(|(p, _)| *p == track.path) { return; }
+        let (path, title) = (track.path.clone(), track.title.clone());
+        match library::lyrics(&path).map(|text| lyrics::parse(&text)).filter(|l| !l.lines.is_empty()) {
+            Some(found) => {
+                self.lyrics = Some((path, found));
+                self.lyrics_scroll = 0;
+            }
+            None => {
+                self.toast(format!("no lyrics for {title}"));
+                self.lyrics = None;
+                self.lyrics_view = None;
+            }
+        }
+    }
+
     fn load_cover(&mut self) {
         self.cover = self.playing().and_then(|t| library::cover(&t.path));
         self.preview = None;
@@ -731,6 +866,12 @@ impl App {
                 Hit::Album(a) | Hit::Song(a, _) => Some(a),
                 Hit::Artist(a) => self.artists[a].albums.first().copied(),
             },
+            // the album of the song under the cursor, or of a playlist's first song
+            Tab::Playlists => {
+                let songs = &self.playlists[self.selected_playlist()?].songs;
+                let song = if self.col() == 1 { songs.get(self.playlist_song_state.selected()?)? } else { songs.first()? };
+                self.song_index.get(&playlist::path_key(song)).map(|&(a, _)| a)
+            }
             Tab::Queue => None,
         }
     }
@@ -800,6 +941,11 @@ impl App {
                 (&mut self.artist_track_state, n)
             }
             (Tab::Search, _) => (&mut self.hit_state, self.hits.len()),
+            (Tab::Playlists, 0) => (&mut self.playlist_state, self.playlist_order.len()),
+            (Tab::Playlists, _) => {
+                let n = self.selected_playlist().map_or(0, |p| self.playlists[p].songs.len());
+                (&mut self.playlist_song_state, n)
+            }
         };
         if n == 0 { return; }
         let cur = state.selected().unwrap_or(0) as isize;
@@ -809,6 +955,7 @@ impl App {
             (Tab::Albums, 0) => self.album_track_state.select(Some(0)),
             (Tab::Artists, 0) => { self.artist_album_state.select(Some(0)); self.artist_track_state.select(Some(0)); }
             (Tab::Artists, 1) => self.artist_track_state.select(Some(0)),
+            (Tab::Playlists, 0) => self.playlist_song_state.select(Some(0)),
             _ => {}
         }
     }
@@ -843,6 +990,9 @@ impl App {
             }
             return;
         }
+        if self.picker.is_some() { return self.picker_key(k); }
+        if self.prompt.is_some() { return self.prompt_key(k); }
+        if self.filtering { return self.filter_key(k); }
         if self.help.is_some() {
             if matches!(k.code, KeyCode::Char('?') | KeyCode::Esc | KeyCode::Char('q')) { self.help = None; }
             return;
@@ -863,18 +1013,40 @@ impl App {
             }
             return;
         }
+        if self.lyrics_shown() {
+            match k.code {
+                KeyCode::Char('L') | KeyCode::Char('q') | KeyCode::Esc => return self.toggle_lyrics(),
+                KeyCode::Char('j') | KeyCode::Down => return self.lyrics_scroll += 1,
+                KeyCode::Char('k') | KeyCode::Up => return self.lyrics_scroll = self.lyrics_scroll.saturating_sub(1),
+                _ => {}
+            }
+        }
         #[cfg(feature = "youtube")]
         if self.yt.active && youtube::key(self, k) { return; }
         match k.code {
+            KeyCode::Char('L') => self.toggle_lyrics(),
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char(':') => self.command = Some(String::new()),
             KeyCode::Char('`') => self.switch_tab(self.last_tab),
             KeyCode::Char('?') => self.help = Some(Help::Keys),
             KeyCode::Char('o') => self.open_sort_menu(),
-            KeyCode::Char(c @ '1'..='4') => self.switch_tab(Tab::ALL[c as usize - '1' as usize]),
+            KeyCode::Char(c @ '1'..='5') => self.switch_tab(Tab::ALL[c as usize - '1' as usize]),
             KeyCode::Tab => self.switch_tab(Tab::ALL[(self.tab.index() + 1) % tabs]),
             KeyCode::BackTab => self.switch_tab(Tab::ALL[(self.tab.index() + tabs - 1) % tabs]),
+            KeyCode::Char('/') if self.tab == Tab::Playlists && self.col() == 0 => self.filtering = true,
             KeyCode::Char('/') => { self.switch_tab(Tab::Search); self.editing = true; }
+            KeyCode::Char('s') => self.open_picker(),
+            KeyCode::Char('r') if self.tab == Tab::Playlists && self.col() == 0 => {
+                if let Some(i) = self.selected_playlist() {
+                    self.prompt = Some(Prompt { kind: PromptKind::Rename(i), text: self.playlists[i].name.clone() });
+                }
+            }
+            KeyCode::Char('d') if self.tab == Tab::Playlists && self.col() == 0 => {
+                if let Some(i) = self.selected_playlist() { self.prompt = Some(Prompt { kind: PromptKind::Delete(i), text: String::new() }); }
+            }
+            KeyCode::Char('d') if self.tab == Tab::Playlists => self.playlist_edit(None),
+            KeyCode::Char('J') if self.tab == Tab::Playlists && self.col() == 1 => self.playlist_edit(Some(1)),
+            KeyCode::Char('K') if self.tab == Tab::Playlists && self.col() == 1 => self.playlist_edit(Some(-1)),
             KeyCode::Char('j') | KeyCode::Down => self.move_selection(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_selection(-1),
             KeyCode::Char('h') | KeyCode::Left => { let c = &mut self.cols[self.tab.index()]; *c = c.saturating_sub(1); }
@@ -929,6 +1101,7 @@ impl App {
     fn tick(&mut self) {
         #[cfg(feature = "youtube")]
         youtube::tick(self);
+        self.load_lyrics();
         self.follow_default_device();
         self.collect_stderr();
         self.update_preview();
@@ -1105,6 +1278,7 @@ fn music_dir() -> PathBuf {
 }
 
 fn main() -> io::Result<()> {
+    if install::handle_flags() { return Ok(()); } // --install, --uninstall, --version, --help
     let dir = music_dir();
     if !dir.is_dir() {
         println!("can't find the folder {}", dir.display());
@@ -1127,12 +1301,12 @@ fn main() -> io::Result<()> {
         tab: Tab::Albums,
         before_search: Tab::Albums,
         last_tab: Tab::Albums,
-        cols: [0; 4],
-        sorts: [0; 3],
+        cols: [0; 5],
+        sorts: [0; 4],
         album_order: Vec::new(),
         artist_order: Vec::new(),
         menu: None,
-        sort_anchors: [Rect::default(); 3],
+        sort_anchors: [Rect::default(); 4],
         marquee_key: (0, usize::MAX),
         marquee_since: Instant::now(),
         queue: Vec::new(),
@@ -1148,6 +1322,18 @@ fn main() -> io::Result<()> {
         hits: Vec::new(),
         hit_state: ListState::default(),
         help: None,
+        playlists: Vec::new(),
+        playlist_order: Vec::new(),
+        playlist_state: ListState::default(),
+        playlist_song_state: ListState::default(),
+        playlist_filter: String::new(),
+        filtering: false,
+        song_index: HashMap::new(),
+        picker: None,
+        prompt: None,
+        lyrics_view: None,
+        lyrics: None,
+        lyrics_scroll: 0,
         #[cfg(feature = "youtube")]
         yt: youtube::State::new(),
         _stream: stream,
@@ -1184,9 +1370,13 @@ fn main() -> io::Result<()> {
         stderr: if std::env::var_os("BERRY_DEBUG").is_some() { None } else { gag::BufferRedirect::stderr().ok() },
         quit: false,
     };
+    if !install::on_path() && library::setting("install_hint").is_none() {
+        app.toast("tip: quit and run berry --install to start berry from any terminal");
+        library::save_setting("install_hint", "shown");
+    }
 
     app.load_sorts();
-    app.apply_sorts();
+    app.reload_playlists(); // also applies the sorts
 
     let mut terminal = ratatui::init();
     let result = run(&mut terminal, &mut app);

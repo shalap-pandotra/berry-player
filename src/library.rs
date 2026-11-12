@@ -210,6 +210,20 @@ fn cached_read(conn: &mut Connection, root: &Path, files: &[PathBuf]) -> rusqlit
     Ok(tracks)
 }
 
+/// Lyrics for a song: a `.lrc` file with the same name next to it (usually synced), or else lyrics
+/// embedded in its tags. The text as-is; `lyrics::parse` makes sense of it.
+pub fn lyrics(path: &Path) -> Option<String> {
+    if let Ok(text) = std::fs::read_to_string(path.with_extension("lrc")) {
+        if !text.trim().is_empty() { return Some(text); }
+    }
+    let file = Probe::open(path).ok()?.read().ok()?;
+    file.tags()
+        .iter()
+        .find_map(|tag| tag.get_string(&ItemKey::Lyrics))
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_string)
+}
+
 fn read_track(path: &Path, added: i64) -> Track {
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Unknown").to_string();
     let folder = path

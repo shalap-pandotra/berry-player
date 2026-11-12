@@ -15,9 +15,11 @@ berry plays your local music library inside Windows Terminal: browse by album or
 - Live search across artists, albums, and songs
 - Sorting by title, artist, year, or recently added, remembered between launches
 - Follows your headphones: switch audio devices and playback moves over on its own
+- Lyrics from your files' tags, or synced .lrc files
 - Plays MP3, FLAC, Opus, OGG, M4A/AAC, WAV, and AIFF
 - Keyboard driven, with Vim-style keys
 - Uses your terminal's colors, so it matches whatever theme you run
+- Playlists, saved as .m3u files in your music folder so other players can read them too
 
 ## Requirements
 
@@ -26,11 +28,17 @@ berry plays your local music library inside Windows Terminal: browse by album or
 - That's it. berry works with any font. If your terminal uses a [Nerd Font](https://www.nerdfonts.com/), you can swap the playback controls for its nicer icons with `:icons nerd` (see Commands).
 ## Install
 
-**The easy way:** download `berry.exe` from the [latest release](../../releases/latest) and put it somewhere on your PATH, or anywhere you like and run it from there.
+**With Scoop:**
+
+scoop bucket add berry https://github.com/shalap-pandotra/scoop-berry
+scoop install berry
+
+
+**Or download it:** grab `berry.exe` from the [latest release](../../releases/latest), then run `berry --install` from wherever you saved it. That copies berry to `%LOCALAPPDATA%\Programs\berry` and adds it to your PATH, so `berry` works from any new terminal (`berry --uninstall` undoes it). Or just run it from anywhere without installing.
 
 Windows may show a SmartScreen warning the first time, since the exe isn't signed. Choose "More info" and then "Run anyway".
 
-**From source:** install [Rust](https://rustup.rs) (including the Visual Studio C++ Build Tools it offers during setup), then:
+**From source:** install [Rust](https://rustup.rs) (including the Visual Studio C++ Build Tools it offers during setup) and [CMake](https://cmake.org/download/), then:
 
 ```
 cargo install --git https://github.com/shalap-pandotra/berry-player
@@ -71,7 +79,10 @@ Press `?` inside berry to see these at any time.
 | `n` / `p` | next / previous |
 | `,` / `.` | seek back / forward 5 seconds |
 | `-` / `=` | volume down / up |
-| `1` to `4` | jump to a tab |
+| `L` | lyrics (`j`/`k` scroll, `q` closes) |
+| `1` to `5` | jump to a tab |
+| `s` | add to playlist |
+| `r` | rename playlist |
 | `tab` / `shift+tab` | next / previous tab |
 | `` ` `` | back to the last tab |
 | `j` / `k` | down / up |
@@ -97,8 +108,10 @@ Press `:` to open the command line. Tab completes, Up and Down bring back earlie
 | `:folder D:\Music` | switch to another music folder; berry opens it next time too |
 | `:rescan` | reread the current folder |
 | `:icons nerd` | use Nerd Font icons for the playback controls (`:icons plain` to switch back) |
+| `:save mix` | save current queue as playlist |
 | `:help` | show the keys |
 | `:q` | quit |
+| `:lyrics` | show or hide the lyrics |
 
 berry remembers your sorts, your music folder, and your icon choice between launches.
 

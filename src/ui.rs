@@ -1,4 +1,4 @@
-use crate::{App, Help, Hit, Repeat, SortTarget, Tab, COMMANDS};
+use crate::{App, Help, Hit, PromptKind, Repeat, SortTarget, Tab, COMMANDS};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
@@ -42,7 +42,70 @@ fn list(f: &mut Frame, area: Rect, title: &str, items: Vec<ListItem<'static>>, s
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     draw_screen(f, app);
+    draw_picker(f, app);
+    draw_prompt(f, app);
     draw_command_line(f, app);
+}
+
+/// A small box centred on the screen, cleared and titled; returns the space inside.
+fn popup(f: &mut Frame, width: u16, height: u16, title: &str) -> Rect {
+    let area = f.area();
+    let (w, h) = (width.min(area.width.saturating_sub(4)), height.min(area.height.saturating_sub(2)));
+    let rect = Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 3, width: w, height: h };
+    f.render_widget(Clear, rect);
+    let block = Block::bordered().title(format!(" {title} ")).padding(Padding::horizontal(1));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    inner
+}
+
+/// `s`: which playlist to add to. Typing narrows the list; "new playlist" is always on top.
+fn draw_picker(f: &mut Frame, app: &mut App) {
+    let Some(picker) = app.picker.as_ref() else { return };
+    let matches = app.picker_matches();
+    let n = picker.songs.len();
+    let title = format!("add {n} song{} to a playlist", if n == 1 { "" } else { "s" });
+    let rows = (matches.len() as u16 + 1).min(12);
+    let inner = popup(f, 50, rows + 4, &title);
+    let [typed, gap, list_area] = Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Min(1)]).areas(inner);
+    let _ = gap;
+    f.render_widget(
+        Paragraph::new(Line::from(vec![Span::styled("/ ", dim()), Span::raw(picker.query.clone()), Span::styled("▏", bold())])),
+        typed,
+    );
+    let new_label = if picker.query.trim().is_empty() { "+ new playlist".to_string() } else { format!("+ new playlist \"{}\"", picker.query.trim()) };
+    let mut items = vec![ListItem::new(Line::styled(new_label, dim()))];
+    for &i in &matches {
+        let p = &app.playlists[i];
+        items.push(ListItem::new(row(None, vec![(p.name.clone(), Style::new())], vec![col(p.songs.len().to_string(), dim(), 5, true)], list_area.width, None)));
+    }
+    let mut state = picker.state.clone();
+    f.render_stateful_widget(List::new(items).highlight_style(Style::new().add_modifier(Modifier::REVERSED)), list_area, &mut state);
+}
+
+/// Naming a new playlist, renaming one, or confirming a delete.
+fn draw_prompt(f: &mut Frame, app: &App) {
+    let Some(prompt) = app.prompt.as_ref() else { return };
+    let (title, line) = match &prompt.kind {
+        PromptKind::NewPlaylist(songs) => (
+            format!("new playlist with {} song{}", songs.len(), if songs.len() == 1 { "" } else { "s" }),
+            Line::from(vec![Span::styled("name: ", dim()), Span::raw(prompt.text.clone()), Span::styled("▏", bold())]),
+        ),
+        PromptKind::Rename(_) => (
+            "rename playlist".to_string(),
+            Line::from(vec![Span::styled("name: ", dim()), Span::raw(prompt.text.clone()), Span::styled("▏", bold())]),
+        ),
+        PromptKind::Delete(i) => (
+            "delete playlist".to_string(),
+            Line::from(vec![
+                Span::raw(format!("delete {}? ", app.playlists[*i].name)),
+                Span::styled("y to delete, anything else to keep it", dim()),
+            ]),
+        ),
+    };
+    let width = (line.width() as u16 + 4).clamp(44, 70);
+    let inner = popup(f, width, 3, &title);
+    f.render_widget(Paragraph::new(line), inner);
 }
 
 /// The `:` prompt, along the bottom edge while it's open, with the commands that match so far.
@@ -69,8 +132,8 @@ fn draw_screen(f: &mut Frame, app: &mut App) {
         let [tabs, body, bar] =
             Layout::vertical([Constraint::Length(1), Constraint::Min(3), Constraint::Length(BAR_ROWS + 2)]).areas(area);
         draw_tabs(f, app, tabs);
-        crate::youtube::draw(f, app, body);
-        // songs being fetched get a panel beside the now playing bar
+        if app.lyrics_shown() { draw_lyrics(f, app, body) } else { crate::youtube::draw(f, app, body) }
+        // songs being fetched
         if crate::youtube::has_fetches(app) {
             let [main_bar, side] = Layout::horizontal([Constraint::Min(40), Constraint::Length(46)]).areas(bar);
             draw_now_bar(f, app, main_bar);
@@ -90,7 +153,7 @@ fn draw_screen(f: &mut Frame, app: &mut App) {
         let [tabs, _, body] =
         Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Min(3)]).areas(left);
         draw_tabs(f, app, tabs);
-        draw_queue(f, app, body);
+        if app.lyrics_shown() { draw_lyrics(f, app, body) } else { draw_queue(f, app, body) }
         draw_now_playing(f, app, right);
         draw_toasts(f, app, body);
         if let Some(which) = app.help { draw_help(f, body, which); }
@@ -101,8 +164,10 @@ fn draw_screen(f: &mut Frame, app: &mut App) {
         Layout::vertical([Constraint::Length(1), Constraint::Min(3), Constraint::Length(BAR_ROWS + 2)]).areas(area);
         draw_tabs(f, app, tabs);
         match app.shown_tab() {
+            _ if app.lyrics_shown() => draw_lyrics(f, app, body),
             Tab::Albums => draw_albums(f, app, body),
             Tab::Artists => draw_artists(f, app, body),
+            Tab::Playlists => draw_playlists(f, app, body),
             _ => draw_search(f, app, body),
         }
         draw_now_bar(f, app, bar);
@@ -323,6 +388,73 @@ fn track_items(app: &App, album: Option<usize>, width: u16, sel: Option<usize>, 
         .unwrap_or_default()
 }
 
+/// Playlists on the left (sortable, and filterable with /), the selected one's songs on the right.
+/// Songs whose files have gone missing are greyed out.
+fn draw_playlists(f: &mut Frame, app: &mut App, area: Rect) {
+    let [l, r] = Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]).areas(area);
+    let focus = app.col();
+    let sel = app.playlist_state.selected();
+    let t = (focus == 0).then(|| ticks(app, 7, sel));
+    let width = l.width.saturating_sub(2);
+    let count_w = app.playlist_order.iter().map(|&i| app.playlists[i].songs.len().to_string().len()).max().unwrap_or(0);
+    let lists: Vec<ListItem<'static>> = app
+        .playlist_order
+        .iter()
+        .enumerate()
+        .map(|(row_i, &i)| {
+            let p = &app.playlists[i];
+            ListItem::new(row(None, vec![(p.name.clone(), Style::new())], vec![col(p.songs.len().to_string(), dim(), count_w, true)], width, scroll_for(row_i, sel, t)))
+        })
+        .collect();
+    let mut title = format!("playlists · {}", sort_label(app, SortTarget::Playlists));
+    if app.filtering || !app.playlist_filter.is_empty() {
+        title = format!("{title} · /{}{}", app.playlist_filter, if app.filtering { "▏" } else { "" });
+    }
+    app.sort_anchors[SortTarget::Playlists as usize] = l;
+    if lists.is_empty() {
+        let hint = if app.playlists.is_empty() {
+            "no playlists yet.\n\npress s on a song, album or artist to start one, or :save name to save the queue."
+        } else {
+            "no playlists match. Esc clears the filter."
+        };
+        f.render_widget(Paragraph::new(hint).style(dim()).wrap(Wrap { trim: true }).block(Block::bordered().title(format!(" {title} ")).padding(Padding::uniform(1))), l);
+    } else {
+        list(f, l, &title, lists, &mut app.playlist_state, focus == 0);
+    }
+
+    let sel = app.playlist_song_state.selected();
+    let t = (focus == 1).then(|| ticks(app, 8, sel));
+    let width = r.width.saturating_sub(2);
+    let playing = app.playing().map(|tr| tr.path.clone());
+    let (name, songs) = match app.selected_playlist() {
+        Some(p) => (app.playlists[p].name.clone(), app.playlist_tracks(p)),
+        None => (String::new(), Vec::new()),
+    };
+    let artist_w = names_width(songs.iter().map(|t| t.artist.as_str()), width);
+    let dur_w = songs.iter().map(|t| fmt(t.duration).len()).max().unwrap_or(0);
+    let items: Vec<ListItem<'static>> = songs
+        .iter()
+        .enumerate()
+        .map(|(i, tr)| {
+            let mark = if Some(&tr.path) == playing.as_ref() { "♪ " } else { "  " };
+            if app.in_library(&tr.path) {
+                ListItem::new(row(
+                    Some((mark.to_string(), Style::new())),
+                    vec![(tr.title.clone(), Style::new())],
+                    vec![col(tr.artist.clone(), dim(), artist_w, false), col(fmt(tr.duration), dim(), dur_w, true)],
+                    width,
+                    scroll_for(i, sel, t),
+                ))
+            } else {
+                // the file's gone: keep its place in the playlist, but greyed out
+                ListItem::new(row(Some((mark.to_string(), dim())), vec![(format!("{} (missing)", tr.title), dim())], vec![], width, scroll_for(i, sel, t)))
+            }
+        })
+        .collect();
+    let title = if name.is_empty() { "songs".to_string() } else { format!("{name} · {} song{}", songs.len(), if songs.len() == 1 { "" } else { "s" }) };
+    list(f, r, &title, items, &mut app.playlist_song_state, focus == 1);
+}
+
 fn draw_albums(f: &mut Frame, app: &mut App, area: Rect) {
     let [l, r] = Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).areas(area);
     let col = app.col();
@@ -508,13 +640,75 @@ fn draw_track_info(f: &mut Frame, app: &App, info: Rect) {
         let play = if playing { "‖" } else { "▶" };
         (format!("|◀   {play}   ▶|     vol {vol}%"), "p   spc  n      - =")
     };
+    // repeat and shuffle: Nerd Font icons when they're on, plain words otherwise
+    let (rep_all, rep_one, shuffled) =
+        if app.nerd_icons { ("\u{f0456}", "\u{f0458}", "\u{f049d}") } else { ("repeat all", "repeat one", "shuffled") };
     let icons = match app.repeat {
         Repeat::Off => icons,
-        Repeat::All => format!("{icons}   repeat all"),
-        Repeat::One => format!("{icons}   repeat one"),
+        Repeat::All => format!("{icons}   {rep_all}"),
+        Repeat::One => format!("{icons}   {rep_one}"),
     };
-    let icons = if app.unshuffled.is_some() { format!("{icons}   shuffled") } else { icons };
+    let icons = if app.unshuffled.is_some() { format!("{icons}   {shuffled}") } else { icons };
     f.render_widget(Paragraph::new(vec![Line::raw(icons), Line::styled(keys, dim())]), controls);
+}
+
+fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
+    let playing = app.playing().map(|t| (t.path.clone(), t.title.clone()));
+    let lyrics = app.lyrics.as_ref().filter(|(p, _)| playing.as_ref().is_some_and(|(pp, _)| pp == p)).map(|(_, l)| l);
+    let title = match (&playing, lyrics) {
+        (Some((_, t)), Some(l)) if l.synced => format!(" lyrics · {t} · synced "),
+        (Some((_, t)), _) => format!(" lyrics · {t} "),
+        _ => " lyrics ".to_string(),
+    };
+    let block = Block::bordered().title(title).padding(Padding::new(2, 2, 1, 0));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let message = |f: &mut Frame, lines: Vec<&str>| {
+        f.render_widget(Paragraph::new(lines.into_iter().map(|l| Line::styled(l.to_string(), dim())).collect::<Vec<_>>()).wrap(Wrap { trim: true }), inner);
+    };
+    let Some(lyrics) = lyrics.filter(|_| !app.waiting) else {
+        let msg = if app.waiting { "lyrics show up once the song is ready" } else { "nothing playing" };
+        return message(f, vec![msg]);
+    };
+    if lyrics.lines.is_empty() {
+        return message(f, vec![
+            "no lyrics for this song.",
+            "",
+            "berry reads lyrics embedded in the file's tags, or a synced .lrc file with the same name next to it.",
+        ]);
+    }
+    // every lyric line wrapped to the panel, remembering which line each row belongs to
+    let width = inner.width as usize;
+    let mut rows: Vec<(usize, String)> = Vec::new();
+    for (i, l) in lyrics.lines.iter().enumerate() {
+        for r in crate::lyrics::wrap(&l.text, width) { rows.push((i, r)); }
+    }
+    let height = inner.height as usize;
+    let current = lyrics.current(app.sink.get_pos());
+    let top = if lyrics.synced {
+        // keep the current line a third of the way down, so what's coming is visible
+        let first_row = current.and_then(|c| rows.iter().position(|(i, _)| *i == c)).unwrap_or(0);
+        first_row.saturating_sub(height / 3)
+    } else {
+        let max = rows.len().saturating_sub(height);
+        app.lyrics_scroll = app.lyrics_scroll.min(max);
+        app.lyrics_scroll
+    };
+    let lines: Vec<Line> = rows
+        .iter()
+        .skip(top)
+        .take(height)
+        .map(|(i, text)| {
+            let style = match current {
+                Some(c) if *i == c => bold(),
+                Some(c) if *i < c => dim(), // already sung
+                _ if lyrics.synced && current.is_none() => dim(), // before the first line
+                _ => Style::new(),
+            };
+            Line::styled(text.clone(), style)
+        })
+        .collect();
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 fn draw_toasts(f: &mut Frame, app: &mut App, area: Rect) {
@@ -607,15 +801,22 @@ fn draw_help(f: &mut Frame, area: Rect, which: Help) {
                 ("n  p", "next / previous"),
                 (",  .", "seek back / forward 5s"),
                 ("-  =", "volume down / up"),
+                ("L", "lyrics (j/k scroll, q closes)"),
                 ("", ""),
                 ("", "queue"),
                 ("J  K", "move song down / up"),
                 ("d", "remove song"),
                 ("D", "clear queue (any tab)"),
+                ("", ""),
+                ("", "playlists"),
+                ("s", "add to a playlist"),
+                ("r", "rename (in playlists)"),
+                ("d", "delete it / remove a song"),
+                ("J  K", "move a song down / up"),
             ];
             let right: &[(&str, &str)] = &[
                 ("", "moving around"),
-                ("1-4", "jump to a tab"),
+                ("1-5", "jump to a tab"),
                 ("tab", "next tab (shift+tab back)"),
                 ("`", "back to the last tab"),
                 ("j  k", "down / up"),
@@ -640,6 +841,8 @@ fn draw_help(f: &mut Frame, area: Rect, which: Help) {
                 (":seek 1:30", "jump to 1:30 in the song"),
                 (":shuffle", "shuffle the queue; again to put it back"),
                 (":repeat", "cycle off / all / one, or :repeat all"),
+                (":lyrics", "show or hide the lyrics"),
+                (":save mix", "save the queue as a playlist called mix"),
                 (":clear", "clear the queue"),
                 (":folder D:\\Music", "switch to another music folder (remembered)"),
                 (":rescan", "reread the current folder"),

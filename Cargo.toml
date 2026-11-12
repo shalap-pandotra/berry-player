@@ -1,6 +1,6 @@
 [package]
 name = "berry"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 
 [dependencies]
@@ -20,6 +20,11 @@ serde_json = { version = "1", optional = true }
 [features]
 # optional extras that aren't part of the default build
 youtube = ["dep:serde_json"]
+
+# berry --install edits your PATH in the registry
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"
+windows-sys = { version = "0.59", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation"] }
 
 [build-dependencies]
 winresource = "0.1"
