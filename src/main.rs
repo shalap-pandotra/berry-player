@@ -70,7 +70,7 @@ pub const COMMANDS: &[&str] = &[
 ];
 #[cfg(feature = "youtube")]
 pub const COMMANDS: &[&str] = &[
-    "clear", "folder", "help", "icons", "library", "lyrics","quit", "repeat", "rescan", "save", "seek", "shuffle", "volume", "youtube",
+    "clear", "folder", "help", "icons", "library", "lyrics","quit", "repeat", "rescan", "save", "seek", "shuffle", "video", "volume", "youtube",
 ];
 
 /// The lists that can be sorted from the `o` menu.
@@ -224,6 +224,7 @@ pub struct App {
     // with nothing playing, the cover box previews the album under the cursor
     preview: Option<usize>,                    // the album being previewed
     preview_pending: Option<(Option<usize>, Instant)>, // the album the cursor stopped on, and since when
+    preview_anchor: Option<Option<usize>>, // while paused: what the cursor was on when you paused
     needs_clear: bool,
     // toasts
     pub toasts: Vec<Toast>,
@@ -616,6 +617,8 @@ impl App {
             "youtube" => youtube::command(self, arg),
             #[cfg(feature = "youtube")]
             "library" => youtube::leave(self),
+            #[cfg(feature = "youtube")]
+            "video" => youtube::video::toggle(self),
             "clear" => self.clear_queue(),
             "shuffle" => self.shuffle(),
             "rescan" => {
@@ -856,7 +859,7 @@ impl App {
 
     /// With nothing playing, the album the cursor is on (it gets previewed in the cover box).
     fn browsing_album(&self) -> Option<usize> {
-        if self.current.is_some() { return None; }
+        if self.current.is_some() && !self.sink.is_paused() { return None; }
         #[cfg(feature = "youtube")]
         if self.yt.active { return None; } // YouTube results aren't albums in the library
         match self.shown_tab() {
@@ -881,7 +884,24 @@ impl App {
     fn update_preview(&mut self) {
         #[cfg(feature = "youtube")]
         if self.yt.active && self.yt.on_search { return youtube::update_preview(self); }
-        if self.current.is_some() { return; }
+        if self.current.is_some() {
+            if !self.sink.is_paused() {
+                // playing: the cover box shows what's playing, so a preview from a pause goes
+                self.preview_anchor = None;
+                if self.preview.is_some() { self.load_cover(); }
+                return;
+            }
+            // paused: previews start once the cursor moves somewhere else, so pausing alone
+            // doesn't swap the cover out
+            let wanted = self.browsing_album();
+            let anchor = *self.preview_anchor.get_or_insert(wanted);
+            if wanted == anchor && anchor != Some(usize::MAX) {
+                self.preview_pending = None;
+                return;
+            }
+            // the cursor's moved: from here on everything previews, even back where it started
+            self.preview_anchor = Some(Some(usize::MAX));
+        }
         let wanted = self.browsing_album();
         if wanted == self.preview {
             self.preview_pending = None;
@@ -890,6 +910,11 @@ impl App {
         match self.preview_pending {
             Some((p, since)) if p == wanted => {
                 if since.elapsed() >= Duration::from_millis(150) {
+                    // paused, and the cursor's somewhere without a cover: back to what's playing
+                    if wanted.is_none() && self.current.is_some() {
+                        self.load_cover();
+                        return;
+                    }
                     self.preview = wanted;
                     self.preview_pending = None;
                     self.cover = wanted.and_then(|a| self.albums[a].tracks.first()).and_then(|t| library::cover(&t.path));
@@ -1194,6 +1219,22 @@ fn build_artists(albums: &[Album]) -> Vec<Artist> {
     artists
 }
 
+#[cfg(feature = "youtube")]
+fn paint_frame(app: &App, sixel: &str) -> io::Result<()> {
+    let area = app.cover_area;
+    let (w, h) = sixel
+        .split_once("\"1;1;")
+        .and_then(|(_, rest)| rest.split_once(['#', '\x1b']))
+        .and_then(|(size, _)| size.split_once(';'))
+        .and_then(|(w, h)| Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?)))
+        .unwrap_or((0, 0));
+    let dx = (area.width as u32 * CELL_W).saturating_sub(w) / 2 / CELL_W;
+    let dy = (area.height as u32 * CELL_H).saturating_sub(h) / 2 / CELL_H;
+    let mut out = io::stdout().lock();
+    write!(out, "\x1b[?25l\x1b7\x1b[0m\x1b[{};{}H{sixel}\x1b8", area.y as u32 + dy + 1, area.x as u32 + dx + 1)?;
+    out.flush()
+}
+
 fn paint_art(app: &App) -> io::Result<()> {
     let area = app.cover_area;
     if area.width == 0 || area.height == 0 { return Ok(()); }
@@ -1247,6 +1288,11 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
             app.art_dirty = false;
             app.art_painted = app.cover_area;
         }
+        // video in the cover box (experimental, YouTube mode): this moment's frame over the cover
+        #[cfg(feature = "youtube")]
+        if let Some(frame) = youtube::video::frame(app) {
+            paint_frame(app, &frame)?;
+        }
         // toast icons are see-through, so anything redrawn underneath would cut into them:
         // repaint them every frame while toasts are up (they're tiny)
         paint_toast_icons(app)?;
@@ -1255,6 +1301,8 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
         io::stdout().flush()?;
         // (every 200ms otherwise, which also keeps a long title's ribbon moving)
         let wait = if app.preview_pending.is_some() { 50 } else { 200 };
+        #[cfg(feature = "youtube")]
+        let wait = if youtube::video::active(app) { 15 } else { wait }; // video needs a quick eye on the clock
         if event::poll(Duration::from_millis(wait))? {
             match event::read()? {
                 Event::Key(k) if k.kind == KeyEventKind::Press => app.key(k),
@@ -1363,6 +1411,7 @@ fn main() -> io::Result<()> {
         art_painted: Rect::default(),
         preview: None,
         preview_pending: None,
+        preview_anchor: None,
         art_dirty: false,
         needs_clear: false,
         toasts: Vec::new(),

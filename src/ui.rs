@@ -126,7 +126,9 @@ fn draw_command_line(f: &mut Frame, app: &App) {
 
 fn draw_screen(f: &mut Frame, app: &mut App) {
     #[cfg(feature = "youtube")]
+    #[cfg(feature = "youtube")]
     if app.yt.active && app.yt.on_search {
+        let area = f.area();
         let [tabs, body, bar] =
             Layout::vertical([Constraint::Length(1), Constraint::Min(3), Constraint::Length(BAR_ROWS + 2)]).areas(area);
         draw_tabs(f, app, tabs);
