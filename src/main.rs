@@ -613,7 +613,7 @@ impl App {
                 if skipped > 0 { self.toast(format!("left out {skipped} YouTube song{}", if skipped == 1 { "" } else { "s" })); }
             }
             #[cfg(feature = "youtube")]
-            "youtube" => youtube::enter(self),
+            "youtube" => youtube::command(self, arg),
             #[cfg(feature = "youtube")]
             "library" => youtube::leave(self),
             "clear" => self.clear_queue(),
@@ -879,6 +879,8 @@ impl App {
     /// Show the cover of the album under the cursor once the cursor has rested there a moment,
     /// so holding j through a long list doesn't decode every cover on the way.
     fn update_preview(&mut self) {
+        #[cfg(feature = "youtube")]
+        if self.yt.active && self.yt.on_search { return youtube::update_preview(self); }
         if self.current.is_some() { return; }
         let wanted = self.browsing_album();
         if wanted == self.preview {

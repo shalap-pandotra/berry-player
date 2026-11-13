@@ -125,8 +125,6 @@ fn draw_command_line(f: &mut Frame, app: &App) {
 }
 
 fn draw_screen(f: &mut Frame, app: &mut App) {
-    let area = f.area();
-    // YouTube mode's search view: same shape as the browsing tabs, with its own list
     #[cfg(feature = "youtube")]
     if app.yt.active && app.yt.on_search {
         let [tabs, body, bar] =
@@ -231,29 +229,85 @@ fn col(text: String, style: Style, width: usize, right: bool) -> Col {
 }
 
 /// Width for a column of names: as wide as the longest, but never more than a third of the row.
-fn names_width<'a>(names: impl Iterator<Item = &'a str>, row_width: u16) -> usize {
-    names.map(|n| n.chars().count()).max().unwrap_or(0).min(row_width as usize / 3)
+/// Text as terminal cells: each entry takes exactly one column on screen. Text is split the way
+/// it's drawn, one visible symbol at a time, so accents stay with their letter and an emoji made of
+/// several joined together counts as the one picture it is. A wide symbol (East Asian text, most
+/// emoji) takes two entries, the second one empty. Column maths counts these, so it matches what's
+/// actually on screen rather than how many characters a title has.
+pub fn cells(s: &str) -> Vec<String> {
+    use unicode_segmentation::UnicodeSegmentation;
+    use unicode_width::UnicodeWidthStr;
+    let mut out: Vec<String> = Vec::new();
+    for g in s.graphemes(true) {
+        match g.width() {
+            0 => {
+                // a stray mark with nothing to sit on: onto the symbol before it
+                let at = if out.last().is_some_and(String::is_empty) { out.len().checked_sub(2) } else { out.len().checked_sub(1) };
+                if let Some(i) = at { out[i].push_str(g); }
+            }
+            1 => out.push(g.to_string()),
+            _ => {
+                out.push(g.to_string());
+                out.push(String::new());
+            }
+        }
+    }
+    out
 }
 
-/// One list row. `prefix` (a track number, the ♪ marker) stays put; `left` scrolls like a ribbon
-/// (on the highlighted row) or ends in "…" (on the others) when it doesn't fit; `cols` are
-/// fixed-width columns lined up on the right, like the artist and a song's length.
+/// How many columns text takes on screen.
+pub fn width(s: &str) -> usize {
+    cells(s).len()
+}
+
+/// After cutting cells out of a line, any wide character that lost one of its halves becomes a
+/// space, so nothing spills into the next column.
+fn mend<T>(cells: &mut [(String, T)]) {
+    use unicode_width::UnicodeWidthStr;
+    let n = cells.len();
+    for i in 0..n {
+        let wide = cells[i].0.width() >= 2;
+        if wide && cells.get(i + 1).is_none_or(|next| !next.0.is_empty()) { cells[i].0 = " ".into(); }
+        if cells[i].0.is_empty() && (i == 0 || cells[i - 1].0.width() < 2) { cells[i].0 = " ".into(); }
+    }
+}
+
+/// Text cut or padded to exactly `w` columns, ending in "…" if it had to be cut.
+pub fn fit(text: &str, w: usize) -> String {
+    let mut c: Vec<(String, ())> = cells(text).into_iter().map(|x| (x, ())).collect();
+    if c.len() <= w {
+        let pad = w - c.len();
+        return format!("{text}{}", " ".repeat(pad));
+    }
+    c.truncate(w.saturating_sub(1));
+    mend(&mut c);
+    let mut out: String = c.into_iter().map(|(x, _)| x).collect();
+    if w > 0 { out.push('…'); }
+    out
+}
+
+fn names_width<'a>(names: impl Iterator<Item = &'a str>, row_width: u16) -> usize {
+    names.map(width).max().unwrap_or(0).min(row_width as usize / 3)
+}
 fn row(prefix: Option<(String, Style)>, left: Vec<(String, Style)>, cols: Vec<Col>, width: u16, scroll: Option<usize>) -> Line<'static> {
     let width = width as usize;
-    let prefix_w = prefix.as_ref().map_or(0, |(t, _)| t.chars().count());
+    let prefix_w = prefix.as_ref().map_or(0, |(t, _)| self::width(t));
     let cols_w: usize = cols.iter().map(|c| c.width + 2).sum();
     let room = width.saturating_sub(cols_w + prefix_w);
-    let chars: Vec<(char, Style)> = left.iter().flat_map(|(t, st)| t.chars().map(move |c| (c, *st))).collect();
-    let blank = (' ', Style::new());
-    let shown: Vec<(char, Style)> = if chars.len() <= room {
+    let chars: Vec<(String, Style)> = left.iter().flat_map(|(t, st)| cells(t).into_iter().map(move |c| (c, *st))).collect();
+    let blank = (" ".to_string(), Style::new());
+    let shown: Vec<(String, Style)> = if chars.len() <= room {
         let mut v = chars;
         v.resize(room, blank);
         v
     } else if let Some(ticks) = scroll {
-        slide(&chars, room, ticks, blank)
+        let mut v = slide(&chars, room, ticks, blank);
+        mend(&mut v);
+        v
     } else {
-        let mut v: Vec<(char, Style)> = chars[..room.saturating_sub(1)].to_vec();
-        if room > 0 { v.push(('…', chars[room - 1].1)); }
+        let mut v: Vec<(String, Style)> = chars[..room.saturating_sub(1)].to_vec();
+        mend(&mut v);
+        if room > 0 { v.push(("…".to_string(), chars[room - 1].1)); }
         v
     };
     // regroup into spans of the same style
@@ -266,21 +320,21 @@ fn row(prefix: Option<(String, Style)>, left: Vec<(String, Style)>, cols: Vec<Co
             spans.push(Span::styled(std::mem::take(&mut text), style));
             style = st;
         }
-        text.push(c);
+        text.push_str(&c);
     }
     spans.push(Span::styled(text, style));
     for c in cols {
-        let n = c.text.chars().count();
+        let n = self::width(&c.text);
         let fitted = if n > c.width {
-            let chars: Vec<char> = c.text.chars().collect();
             match scroll {
                 // the highlighted row scrolls long names too, in step with its title
-                Some(ticks) => slide(&chars, c.width, ticks, ' ').into_iter().collect(),
-                None => {
-                    let mut t: String = chars[..c.width.saturating_sub(1)].iter().collect();
-                    if c.width > 0 { t.push('…'); }
-                    t
+                Some(ticks) => {
+                    let all: Vec<(String, ())> = cells(&c.text).into_iter().map(|x| (x, ())).collect();
+                    let mut v = slide(&all, c.width, ticks, (" ".to_string(), ()));
+                    mend(&mut v);
+                    v.into_iter().map(|(x, _)| x).collect()
                 }
+                None => fit(&c.text, c.width),
             }
         } else if c.right {
             format!("{}{}", " ".repeat(c.width - n), c.text)
@@ -292,15 +346,12 @@ fn row(prefix: Option<(String, Style)>, left: Vec<(String, Style)>, cols: Vec<Co
     }
     Line::from(spans)
 }
-
-/// The ribbon: the text, a gap, then the text again, sliding left through a `room`-wide window,
-/// resting a moment at the start of each pass.
-fn slide<T: Copy>(items: &[T], room: usize, ticks: usize, blank: T) -> Vec<T> {
+fn slide<T: Clone>(items: &[T], room: usize, ticks: usize, blank: T) -> Vec<T> {
     const GAP: usize = 4;
     const REST: usize = 6;
     let cycle = items.len() + GAP;
     let offset = (ticks % (cycle + REST)).saturating_sub(REST);
-    (0..room).map(|i| items.get((offset + i) % cycle).copied().unwrap_or(blank)).collect()
+    (0..room).map(|i| items.get((offset + i) % cycle).cloned().unwrap_or_else(|| blank.clone())).collect()
 }
 
 /// How far the highlighted row's ribbon has scrolled
@@ -325,7 +376,7 @@ fn draw_queue(f: &mut Frame, app: &mut App, area: Rect) {
     let artist_w = names_width(app.queue.iter().map(|tr| tr.artist.as_str()), width);
     // a song that isn't ready yet shows its status where its length would go
     let right = |tr: &crate::library::Track| app.statuses.get(&tr.path).map_or_else(|| fmt(tr.duration), |s| s.label.clone());
-    let dur_w = app.queue.iter().map(|tr| right(tr).chars().count()).max().unwrap_or(0);
+    let dur_w = app.queue.iter().map(|tr| self::width(&right(tr))).max().unwrap_or(0);
     let items: Vec<ListItem> = app
         .queue
         .iter()
