@@ -288,7 +288,7 @@ struct Probed {
 fn probe(path: &Path) -> Option<Probed> {
     let mut cmd = std::process::Command::new("ffprobe");
     cmd.args(["-v", "error", "-show_entries", "format=duration:format_tags=title,artist,album", "-of", "default=noprint_wrappers=1"]).arg(path);
-    crate::video::no_window(&mut cmd);
+    crate::no_window(&mut cmd);
     let out = cmd.output().ok().filter(|o| o.status.success())?;
     let text = String::from_utf8_lossy(&out.stdout);
     let mut info = Probed { duration: Duration::ZERO, title: None, artist: None, album: None };
@@ -322,7 +322,7 @@ fn video_frame(path: &Path) -> Option<Vec<u8>> {
     for at in ["10", "0"] {
         let mut cmd = std::process::Command::new("ffmpeg");
         cmd.args(["-loglevel", "error", "-nostdin", "-y", "-ss", at, "-i"]).arg(path).args(["-frames:v", "1", "-vf", "scale=640:-2", "-q:v", "4"]).arg(&file);
-        crate::video::no_window(&mut cmd);
+        crate::no_window(&mut cmd);
         if cmd.status().is_ok_and(|s| s.success()) {
             if let Ok(bytes) = std::fs::read(&file) { if !bytes.is_empty() { return Some(bytes); } }
         }

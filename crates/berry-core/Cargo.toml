@@ -1,0 +1,12 @@
+[package]
+name = "berry-core"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+# berry's guts, with no terminal in sight: the library and its cache, playlists, lyrics.
+# Anything that only makes sense in a terminal belongs in berry-tui instead.
+[dependencies]
+lofty = "0.22"
+rusqlite = { version = "0.32", features = ["bundled"] }
+walkdir = "2"

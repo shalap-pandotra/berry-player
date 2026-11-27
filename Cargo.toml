@@ -1,38 +1,13 @@
-[package]
-name = "berry"
+[workspace]
+members = ["crates/berry-core", "crates/berry-tui"]
+resolver = "2"
+
+# shared by both crates: bump the version here and both follow
+[workspace.package]
 version = "0.2.2"
 edition = "2021"
 
-[dependencies]
-ratatui = "0.29"
-crossterm = "0.28"
-rodio = { version = "0.20", default-features = false }
-symphonia = { version = "0.6", features = ["all"] }
-symphonia-adapter-libopus = "0.3"
-lofty = "0.22"
-walkdir = "2"
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
-color_quant = "1.1"
-gag = "1"
-unicode-segmentation = "1"
-unicode-width = "0.2"
-rusqlite = { version = "0.32", features = ["bundled"] }
-serde_json = { version = "1", optional = true }
-ureq = { version = "3", optional = true }
-sha1_smol = { version = "1", optional = true }
-
-[features]
-# optional extras that aren't part of the default build
-youtube = ["dep:serde_json", "dep:ureq", "dep:sha1_smol"]
-
-# berry --install edits your PATH in the registry
-[target.'cfg(windows)'.dependencies]
-winreg = "0.55"
-windows-sys = { version = "0.59", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_System_Power"] }
-
-[build-dependencies]
-winresource = "0.1"
-
+# profiles only count in the workspace file, so the release settings live here
 [profile.release]
 opt-level = 3
 lto = true

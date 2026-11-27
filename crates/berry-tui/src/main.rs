@@ -1,9 +1,8 @@
 mod decode;
 mod icon;
 mod install;
-mod library;
-mod lyrics;
-mod playlist;
+use berry_core::{library, lyrics, playlist};
+mod playlist_ui;
 mod sixel;
 mod video;
 #[cfg(feature = "youtube")]

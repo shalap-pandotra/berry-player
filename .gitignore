@@ -1,5 +1,5 @@
 /target
 .obsidian
 suggestions.md
-src/youtube/
+crates/berry-tui/src/youtube
 

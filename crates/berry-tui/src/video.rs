@@ -51,15 +51,8 @@ pub fn ffmpeg_available() -> bool {
     cmd.status().is_ok()
 }
 
-/// Background programs shouldn't flash a console window up on Windows.
-pub fn no_window(cmd: &mut Command) {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000);
-    }
-    let _ = cmd;
-}
+/// Background programs shouldn't flash a console window up on Windows (lives in berry-core now).
+pub use berry_core::no_window;
 
 /// Video's own log, always kept (it's small: a few lines per video), so when a video fails the
 /// reason's already written down: %LOCALAPPDATA%\berry\video.log. Trimmed to its most recent part
