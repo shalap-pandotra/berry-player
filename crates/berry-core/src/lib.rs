@@ -1,6 +1,7 @@
 //! berry's guts: the music library (and its cache), playlists and lyrics. No terminal, no audio
 //! output: the terminal player and, later, the Android app both build on this.
 
+pub mod art;
 pub mod library;
 pub mod lyrics;
 pub mod playlist;

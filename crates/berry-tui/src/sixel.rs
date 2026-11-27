@@ -1,5 +1,3 @@
-use color_quant::NeuQuant;
-use image::imageops::FilterType;
 
 /// A cover encoded as Sixel, plus its size in pixels.
 pub struct Art {
@@ -8,23 +6,10 @@ pub struct Art {
     pub height: u32,
 }
 
-/// Decode an image, fit it inside max_w x max_h pixels (keeping its shape),
-/// reduce it to 256 colours, and encode it as Sixel.
 pub fn encode(bytes: &[u8], max_w: u32, max_h: u32) -> Option<Art> {
-    let img = image::load_from_memory(bytes).ok()?;
-    let img = img.resize(max_w.max(1), max_h.max(1), FilterType::Lanczos3).to_rgba8();
-    let (w, h) = img.dimensions();
-
-    // flatten any transparency onto black, then pick the best 256 colours
-    let mut rgba = img.into_raw();
-    for px in rgba.chunks_mut(4) {
-        let a = px[3] as u32;
-        for c in &mut px[..3] { *c = (*c as u32 * a / 255) as u8; }
-        px[3] = 255;
-    }
-    let nq = NeuQuant::new(10, 256, &rgba);
-    let palette = nq.color_map_rgb();
-    let indices = dither(&rgba, w as usize, h as usize, &nq);
+    let q = berry_core::art::quantize(bytes, max_w, max_h)?;
+    let (w, h) = (q.width, q.height);
+    let (palette, indices) = (&q.palette, &q.indices);
     let colours = palette.len() / 3;
 
     let mut s = String::with_capacity((w * h) as usize);
@@ -62,36 +47,6 @@ pub fn encode(bytes: &[u8], max_w: u32, max_h: u32) -> Option<Art> {
     Some(Art { data: s, width: w, height: h })
 }
 
-/// Map each pixel to its nearest palette colour with Floyd-Steinberg dithering,
-/// so smooth gradients don't band into flat patches.
-fn dither(rgba: &[u8], w: usize, h: usize, nq: &NeuQuant) -> Vec<u8> {
-    let palette = nq.color_map_rgb();
-    let mut buf: Vec<[f32; 3]> = rgba.chunks(4).map(|p| [p[0] as f32, p[1] as f32, p[2] as f32]).collect();
-    let mut out = vec![0u8; w * h];
-    for y in 0..h {
-        for x in 0..w {
-            let i = y * w + x;
-            let c = buf[i].map(|v| v.clamp(0.0, 255.0));
-            let idx = nq.index_of(&[c[0] as u8, c[1] as u8, c[2] as u8, 255]);
-            out[i] = idx as u8;
-            let chosen = &palette[idx * 3..idx * 3 + 3];
-            let err = [c[0] - chosen[0] as f32, c[1] - chosen[1] as f32, c[2] - chosen[2] as f32];
-            let mut spread = |xx: isize, yy: usize, f: f32| {
-                if xx >= 0 && (xx as usize) < w && yy < h {
-                    let px = &mut buf[yy * w + xx as usize];
-                    for k in 0..3 { px[k] += err[k] * f; }
-                }
-            };
-            spread(x as isize + 1, y, 7.0 / 16.0);
-            spread(x as isize - 1, y + 1, 3.0 / 16.0);
-            spread(x as isize, y + 1, 5.0 / 16.0);
-            spread(x as isize + 1, y + 1, 1.0 / 16.0);
-        }
-    }
-    out
-}
-
-/// Write one colour's row of sixels, collapsing repeats as "!<count><char>".
 fn push_rle(s: &mut String, row: &[u8]) {
     let mut i = 0;
     while i < row.len() {

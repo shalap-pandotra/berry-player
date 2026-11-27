@@ -10,3 +10,5 @@ publish = false
 lofty = "0.22"
 rusqlite = { version = "0.32", features = ["bundled"] }
 walkdir = "2"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+color_quant = "1.1"

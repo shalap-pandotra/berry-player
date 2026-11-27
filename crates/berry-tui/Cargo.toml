@@ -13,7 +13,6 @@ symphonia-adapter-libopus = "0.3"
 lofty = "0.22"
 walkdir = "2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
-color_quant = "1.1"
 gag = "1"
 unicode-segmentation = "1"
 unicode-width = "0.2"

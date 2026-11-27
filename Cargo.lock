@@ -74,7 +74,6 @@ name = "berry"
 version = "0.2.2"
 dependencies = [
  "berry-core",
- "color_quant",
  "crossterm",
  "gag",
  "image",
@@ -99,6 +98,8 @@ dependencies = [
 name = "berry-core"
 version = "0.2.2"
 dependencies = [
+ "color_quant",
+ "image",
  "lofty",
  "rusqlite",
  "walkdir",
