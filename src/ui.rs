@@ -44,7 +44,24 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     draw_screen(f, app);
     draw_picker(f, app);
     draw_prompt(f, app);
+    draw_chooser(f, app);
     draw_command_line(f, app);
+}
+
+/// A "choose one" popup, drawn like the playlist picker: each option with its note on the right.
+fn draw_chooser(f: &mut Frame, app: &App) {
+    let Some(c) = app.chooser.as_ref() else { return };
+    let label_w = c.options.iter().map(|(l, _)| width(l)).max().unwrap_or(0);
+    let note_w = c.options.iter().map(|(_, n)| width(n)).max().unwrap_or(0);
+    let wide = (label_w + note_w + 8).max(width(&c.title) + 6).clamp(40, 76) as u16;
+    let inner = popup(f, wide, (c.options.len() as u16).min(14) + 2, &c.title);
+    let items: Vec<ListItem> = c
+        .options
+        .iter()
+        .map(|(label, note)| ListItem::new(row(None, vec![(label.clone(), Style::new())], vec![col(note.clone(), dim(), note_w, true)], inner.width, None)))
+        .collect();
+    let mut state = c.state.clone();
+    f.render_stateful_widget(List::new(items).highlight_style(Style::new().add_modifier(Modifier::REVERSED)), inner, &mut state);
 }
 
 /// A small box centred on the screen, cleared and titled; returns the space inside.
@@ -196,12 +213,14 @@ fn draw_now_bar(f: &mut Frame, app: &mut App, area: Rect) {
 fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
     #[cfg(feature = "youtube")]
     if app.yt.active {
-        f.render_widget(Paragraph::new(crate::youtube::tab_line(app)), area);
+        f.render_widget(Paragraph::new(crate::youtube::tab_line(app, area.width)), area);
         return;
     }
     let mut spans = vec![Span::raw(" ")];
+    let full: usize = Tab::ALL.iter().enumerate().map(|(i, t)| width(&format!(" [{}] {} ", i + 1, t.name())) + 1).sum::<usize>() + 1;
+    let compact = full > area.width as usize;
     for (i, t) in Tab::ALL.iter().enumerate() {
-        let label = format!(" [{}] {} ", i + 1, t.name());
+        let label = if compact && *t != app.tab { format!(" [{}] ", i + 1) } else { format!(" [{}] {} ", i + 1, t.name()) };
         spans.push(if *t == app.tab {
             Span::styled(label, Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD))
         } else {
@@ -209,12 +228,19 @@ fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
             });
         spans.push(Span::raw(" "));
     }
+    let mut used: usize = spans.iter().map(|s| width(&s.content)).sum();
     if app.tab == Tab::Search || !app.query.is_empty() {
+        // the search, its end kept in view if it's longer than the room left
+        let room = (area.width as usize).saturating_sub(used + 3 + 1 + 10).max(8);
+        let c = cells(&app.query);
+        let shown: String = if c.len() > room { format!("…{}", c[c.len() - (room - 1)..].concat()) } else { app.query.clone() };
+        used += 3 + width(&shown) + usize::from(app.editing);
         spans.push(Span::styled(" / ", dim()));
-        spans.push(Span::raw(app.query.clone()));
+        spans.push(Span::raw(shown));
         if app.editing { spans.push(Span::styled("▏", bold())); }
     }
-    spans.push(Span::styled("    ? help", dim()));
+    // "? help" only if there's room for it, rather than half of it
+    if used + 10 <= area.width as usize { spans.push(Span::styled("    ? help", dim())); }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
@@ -896,6 +922,7 @@ fn draw_help(f: &mut Frame, area: Rect, which: Help) {
                 (":repeat", "cycle off / all / one, or :repeat all"),
                 (":lyrics", "show or hide the lyrics"),
                 (":save mix", "save the queue as a playlist called mix"),
+                (":video", "show videos' picture in the cover box (needs ffmpeg)"),
                 (":clear", "clear the queue"),
                 (":folder D:\\Music", "switch to another music folder (remembered)"),
                 (":rescan", "reread the current folder"),

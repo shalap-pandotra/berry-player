@@ -20,12 +20,14 @@ berry plays your local music library inside Windows Terminal: browse by album or
 - Keyboard driven, with Vim-style keys
 - Uses your terminal's colors, so it matches whatever theme you run
 - Playlists, saved as .m3u files in your music folder so other players can read them too
+- Videos in your music folder play too, and with :video on (and ffmpeg installed), their picture plays in the cover box
 
 ## Requirements
 
 - Windows 10 or 11
 - **Windows Terminal 1.22 or newer.** That's the version that added Sixel image support; on older versions berry still works, just without covers.
 - That's it. berry works with any font. If your terminal uses a [Nerd Font](https://www.nerdfonts.com/), you can swap the playback controls for its nicer icons with `:icons nerd` (see Commands).
+- Optional: [ffmpeg](https://ffmpeg.org). With it, berry plays practically any audio or video format (surround sound, Dolby, DTS, WMA, AVI and more), and :video shows videos' picture.
 ## Install
 
 **With Scoop:**
@@ -109,6 +111,7 @@ Press `:` to open the command line. Tab completes, Up and Down bring back earlie
 | `:rescan` | reread the current folder |
 | `:icons nerd` | use Nerd Font icons for the playback controls (`:icons plain` to switch back) |
 | `:save mix` | save current queue as playlist |
+| `:video` | show videos |
 | `:help` | show the keys |
 | `:q` | quit |
 | `:lyrics` | show or hide the lyrics |

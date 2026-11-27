@@ -5,6 +5,7 @@ mod library;
 mod lyrics;
 mod playlist;
 mod sixel;
+mod video;
 #[cfg(feature = "youtube")]
 mod youtube;
 mod ui;
@@ -66,7 +67,7 @@ pub enum Repeat { Off, All, One }
 /// Commands the `:` line knows, for Tab completion and the hints shown while typing.
 #[cfg(not(feature = "youtube"))]
 pub const COMMANDS: &[&str] = &[
-    "clear", "folder", "help", "icons", "lyrics", "quit", "repeat", "rescan", "save", "seek", "shuffle", "volume",
+    "clear", "folder", "help", "icons", "lyrics", "quit", "repeat", "rescan", "save", "seek", "shuffle", "video", "volume",
 ];
 #[cfg(feature = "youtube")]
 pub const COMMANDS: &[&str] = &[
@@ -115,6 +116,15 @@ pub struct Picker {
     pub songs: Vec<PathBuf>,
     pub query: String,
     pub state: ListState,
+}
+
+/// A "choose one" popup: a title, the options (each with a dimmed note beside it), and the cursor.
+/// Whoever opened it gets the choice, by `purpose` (see App::chosen).
+pub struct Chooser {
+    pub title: String,
+    pub options: Vec<(String, String)>,
+    pub state: ListState,
+    pub purpose: &'static str,
 }
 
 /// A small question in the middle of the screen: a name to type, or a yes/no.
@@ -177,6 +187,7 @@ pub struct App {
     pub hits: Vec<Hit>,
     pub hit_state: ListState,
     pub help: Option<Help>,
+    pub video: video::State, // video's picture in the cover box (:video)
     // playlists tab: the playlists, their display order (sorted, and narrowed by the filter), the
     // cursor in each column, and the filter being typed
     pub playlists: Vec<playlist::Playlist>,
@@ -188,6 +199,7 @@ pub struct App {
     song_index: HashMap<String, (usize, usize)>, // library songs by path, to turn playlist entries back into songs
     pub picker: Option<Picker>,
     pub prompt: Option<Prompt>,
+    pub chooser: Option<Chooser>,
     // the lyrics panel: which screen it's open on (see view()), the lyrics of the song playing (keyed
     // by its file), and how far plain lyrics are scrolled
     pub lyrics_view: Option<u8>,
@@ -216,6 +228,7 @@ pub struct App {
     // on one of them (it starts the moment it's ready)
     pub statuses: HashMap<PathBuf, Status>,
     pub waiting: bool,
+    awake: (bool, bool), // told Windows to stay awake: (the PC, the screen)
     cover: Option<Vec<u8>>,
     art_cache: HashMap<(u16, u16), sixel::Art>, // the current cover, encoded once per box size
     art_area: Rect,                              // where the cover was last laid out
@@ -617,8 +630,7 @@ impl App {
             "youtube" => youtube::command(self, arg),
             #[cfg(feature = "youtube")]
             "library" => youtube::leave(self),
-            #[cfg(feature = "youtube")]
-            "video" => youtube::video::toggle(self),
+            "video" => video::toggle(self),
             "clear" => self.clear_queue(),
             "shuffle" => self.shuffle(),
             "rescan" => {
@@ -800,10 +812,43 @@ impl App {
         self.hit_state.select(if self.hits.is_empty() { None } else { Some(0) });
     }
 
-    // ---------- cover art ----------
+    fn stay_awake(&mut self) {
+        let playing = self.current.is_some() && !self.sink.is_paused();
+        let watching = playing && video::active(self);
+        if (playing, watching) == self.awake { return; }
+        self.awake = (playing, watching);
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::System::Power::{SetThreadExecutionState, ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED};
+            let mut flags = ES_CONTINUOUS;
+            if playing { flags |= ES_SYSTEM_REQUIRED; }
+            if watching { flags |= ES_DISPLAY_REQUIRED; }
+            // SAFETY: just sets a flag on this thread (berry's main one, which lives as long as it does)
+            unsafe { SetThreadExecutionState(flags); }
+        }
+    }
 
-    /// `L`: close the panel if it's on this screen, otherwise open it here (moving it if it was
-    /// open on another screen). Nothing opens for a song without lyrics, just a toast.
+    fn chooser_key(&mut self, k: KeyEvent) {
+        let Some(c) = self.chooser.as_mut() else { return };
+        let (n, at) = (c.options.len(), c.state.selected().unwrap_or(0));
+        match k.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.chooser = None,
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab if n > 0 => c.state.select(Some((at + 1).min(n - 1))),
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => c.state.select(Some(at.saturating_sub(1))),
+            KeyCode::Enter if n > 0 => {
+                if let Some(c) = self.chooser.take() { self.chosen(c.purpose, at); }
+            }
+            _ => {}
+        }
+    }
+
+    /// A choice made in a "choose one" popup, handed to whoever opened it.
+    fn chosen(&mut self, purpose: &'static str, choice: usize) {
+        #[cfg(feature = "youtube")]
+        if purpose.starts_with("yt.") { return youtube::chosen(self, purpose, choice); }
+        let _ = (purpose, choice);
+    }
+
     fn toggle_lyrics(&mut self) {
         if self.lyrics_shown() {
             self.lyrics_view = None;
@@ -1017,6 +1062,7 @@ impl App {
             }
             return;
         }
+        if self.chooser.is_some() { return self.chooser_key(k); }
         if self.picker.is_some() { return self.picker_key(k); }
         if self.prompt.is_some() { return self.prompt_key(k); }
         if self.filtering { return self.filter_key(k); }
@@ -1129,6 +1175,7 @@ impl App {
         #[cfg(feature = "youtube")]
         youtube::tick(self);
         self.load_lyrics();
+        self.stay_awake();
         self.follow_default_device();
         self.collect_stderr();
         self.update_preview();
@@ -1219,7 +1266,6 @@ fn build_artists(albums: &[Album]) -> Vec<Artist> {
     artists
 }
 
-#[cfg(feature = "youtube")]
 fn paint_frame(app: &App, sixel: &str) -> io::Result<()> {
     let area = app.cover_area;
     let (w, h) = sixel
@@ -1288,9 +1334,8 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
             app.art_dirty = false;
             app.art_painted = app.cover_area;
         }
-        // video in the cover box (experimental, YouTube mode): this moment's frame over the cover
-        #[cfg(feature = "youtube")]
-        if let Some(frame) = youtube::video::frame(app) {
+        // video in the cover box (:video): this moment's frame over the cover
+        if let Some(frame) = video::frame(app) {
             paint_frame(app, &frame)?;
         }
         // toast icons are see-through, so anything redrawn underneath would cut into them:
@@ -1301,8 +1346,7 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
         io::stdout().flush()?;
         // (every 200ms otherwise, which also keeps a long title's ribbon moving)
         let wait = if app.preview_pending.is_some() { 50 } else { 200 };
-        #[cfg(feature = "youtube")]
-        let wait = if youtube::video::active(app) { 15 } else { wait }; // video needs a quick eye on the clock
+        let wait = if video::active(app) { 15 } else { wait }; // video needs a quick eye on the clock
         if event::poll(Duration::from_millis(wait))? {
             match event::read()? {
                 Event::Key(k) if k.kind == KeyEventKind::Press => app.key(k),
@@ -1372,6 +1416,7 @@ fn main() -> io::Result<()> {
         hits: Vec::new(),
         hit_state: ListState::default(),
         help: None,
+        video: video::State::new(),
         playlists: Vec::new(),
         playlist_order: Vec::new(),
         playlist_state: ListState::default(),
@@ -1381,6 +1426,7 @@ fn main() -> io::Result<()> {
         song_index: HashMap::new(),
         picker: None,
         prompt: None,
+        chooser: None,
         lyrics_view: None,
         lyrics: None,
         lyrics_scroll: 0,
@@ -1405,6 +1451,7 @@ fn main() -> io::Result<()> {
         cover_wide: false,
         statuses: HashMap::new(),
         waiting: false,
+        awake: (false, false),
         cover: None,
         art_cache: HashMap::new(),
         art_area: Rect::default(),

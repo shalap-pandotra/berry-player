@@ -6,7 +6,13 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 use walkdir::WalkDir;
 
-const AUDIO: &[&str] = &["mp3", "flac", "ogg", "opus", "m4a", "aac", "wav", "aiff", "aif"];
+const AUDIO: &[&str] = &["mp3", "flac", "ogg", "opus", "m4a", "aac", "wav", "aiff", "aif", "wma", "ape", "wv", "mka", "ac3", "dts", "tta", "mpc"];
+
+const VIDEO: &[&str] = &["mp4", "m4v", "mkv", "webm", "mov", "avi", "wmv", "flv", "mpg", "mpeg", "ts", "m2ts", "mts", "3gp", "ogv", "vob", "divx"];
+
+pub fn is_video(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| VIDEO.iter().any(|v| v.eq_ignore_ascii_case(e)))
+}
 
 #[derive(Clone)]
 pub struct Track {
@@ -49,23 +55,23 @@ fn open_db() -> Option<Connection> {
     }
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS tracks (
-            path     TEXT PRIMARY KEY,
-            root     TEXT NOT NULL,
-            mtime    INTEGER NOT NULL,
-            size     INTEGER NOT NULL,
-            title    TEXT NOT NULL,
-            artist   TEXT NOT NULL,
-            album    TEXT NOT NULL,
-            number   INTEGER NOT NULL,
-            disc     INTEGER NOT NULL,
-            year     INTEGER NOT NULL,
-            added    INTEGER NOT NULL,
-            duration INTEGER NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS tracks_root ON tracks(root);",
+CREATE TABLE IF NOT EXISTS tracks (
+path     TEXT PRIMARY KEY,
+root     TEXT NOT NULL,
+mtime    INTEGER NOT NULL,
+size     INTEGER NOT NULL,
+title    TEXT NOT NULL,
+artist   TEXT NOT NULL,
+album    TEXT NOT NULL,
+number   INTEGER NOT NULL,
+disc     INTEGER NOT NULL,
+year     INTEGER NOT NULL,
+added    INTEGER NOT NULL,
+duration INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS tracks_root ON tracks(root);",
     )
-    .ok()?;
+        .ok()?;
     Some(conn)
 }
 
@@ -106,7 +112,7 @@ pub fn scan(root: &Path) -> Vec<Album> {
             e.path()
                 .extension()
                 .and_then(|x| x.to_str())
-                .is_some_and(|x| AUDIO.contains(&x.to_ascii_lowercase().as_str()))
+                .is_some_and(|x| { let x = x.to_ascii_lowercase(); AUDIO.contains(&x.as_str()) || VIDEO.contains(&x.as_str()) })
         })
         .map(|e| e.into_path())
         .collect();
@@ -183,7 +189,7 @@ fn cached_read(conn: &mut Connection, root: &Path, files: &[PathBuf]) -> rusqlit
     {
         let mut upsert = tx.prepare(
             "INSERT OR REPLACE INTO tracks (path, root, mtime, size, title, artist, album, number, disc, year, added, duration)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         )?;
         for file in files {
             let key = file.to_string_lossy().to_string();
@@ -243,7 +249,9 @@ fn read_track(path: &Path, added: i64) -> Track {
         added,
         duration: Duration::ZERO,
     };
-    if let Ok(file) = Probe::open(path).and_then(|p| p.read()) {
+    let read = Probe::open(path).and_then(|p| p.read());
+    let understood = read.is_ok();
+    if let Ok(file) = read {
         t.duration = file.properties().duration();
         if let Some(tag) = file.primary_tag().or_else(|| file.first_tag()) {
             if let Some(v) = tag.title() { t.title = v.to_string(); }
@@ -254,7 +262,72 @@ fn read_track(path: &Path, added: i64) -> Track {
             if let Some(v) = tag.year() { t.year = v; }
         }
     }
+    // formats the tag reader doesn't know (MKV, AVI, WMA...) still need a length, and a title if
+    // the file has one: ffprobe (part of ffmpeg) knows, if it's installed
+    if !understood || t.duration.is_zero() {
+        if let Some(info) = probe(path) {
+            if t.duration.is_zero() { t.duration = info.duration; }
+            if !understood {
+                if let Some(v) = info.title { t.title = v; }
+                if let Some(v) = info.artist { t.artist = v; }
+                if let Some(v) = info.album { t.album = v; }
+            }
+        }
+    }
     t
+}
+
+/// What ffprobe says about a file: its length, and its title, artist and album if it has them.
+struct Probed {
+    duration: Duration,
+    title: Option<String>,
+    artist: Option<String>,
+    album: Option<String>,
+}
+
+fn probe(path: &Path) -> Option<Probed> {
+    let mut cmd = std::process::Command::new("ffprobe");
+    cmd.args(["-v", "error", "-show_entries", "format=duration:format_tags=title,artist,album", "-of", "default=noprint_wrappers=1"]).arg(path);
+    crate::video::no_window(&mut cmd);
+    let out = cmd.output().ok().filter(|o| o.status.success())?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut info = Probed { duration: Duration::ZERO, title: None, artist: None, album: None };
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once('=') else { continue };
+        let value = value.trim();
+        if value.is_empty() || value == "N/A" { continue; }
+        match key.trim().to_ascii_lowercase().as_str() {
+            "duration" => info.duration = value.parse::<f64>().map(|s| Duration::from_secs_f64(s.max(0.0))).unwrap_or_default(),
+            "tag:title" => info.title = Some(value.to_string()),
+            "tag:artist" => info.artist = Some(value.to_string()),
+            "tag:album" => info.album = Some(value.to_string()),
+            _ => {}
+        }
+    }
+    Some(info)
+}
+
+/// A frame from a video, for its cover when it has no art of its own. Made once with ffmpeg (if
+/// it's installed), then kept in %LOCALAPPDATA%\berry\thumbnails.
+fn video_frame(path: &Path) -> Option<Vec<u8>> {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut h);
+    std::fs::metadata(path).ok()?.modified().ok()?.hash(&mut h);
+    let dir = std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir).join("berry").join("thumbnails");
+    let file = dir.join(format!("{:016x}.jpg", h.finish()));
+    if let Ok(bytes) = std::fs::read(&file) { return Some(bytes); }
+    let _ = std::fs::create_dir_all(&dir);
+    // a little way in (opening titles are often black), or the very start for short clips
+    for at in ["10", "0"] {
+        let mut cmd = std::process::Command::new("ffmpeg");
+        cmd.args(["-loglevel", "error", "-nostdin", "-y", "-ss", at, "-i"]).arg(path).args(["-frames:v", "1", "-vf", "scale=640:-2", "-q:v", "4"]).arg(&file);
+        crate::video::no_window(&mut cmd);
+        if cmd.status().is_ok_and(|s| s.success()) {
+            if let Ok(bytes) = std::fs::read(&file) { if !bytes.is_empty() { return Some(bytes); } }
+        }
+    }
+    None
 }
 
 /// Cover art for a track: embedded picture first, then a cover/folder image next to the file.
@@ -278,6 +351,9 @@ pub fn cover(path: &Path) -> Option<Vec<u8>> {
         if p.is_file() {
             return std::fs::read(p).ok();
         }
+    }
+    if is_video(path) {
+        return video_frame(path);
     }
     None
 }
